@@ -20,11 +20,11 @@ function App() {
     loadSessions();
   }, []);
 
-  // Auto-load PDFs when session changes
+  // Auto-load PDFs and history when session changes
   useEffect(() => {
     if (session) {
       loadPdfs();
-      setMessages([]); // Reset chat for new session
+      loadHistory();
     }
   }, [session]);
 
@@ -42,6 +42,20 @@ function App() {
       }
     } catch (err) {
       console.error("Failed to load sessions", err);
+    }
+  };
+
+  const loadHistory = async () => {
+    try {
+      const res = await fetch(
+        `http://127.0.0.1:8000/api/history/?session=${encodeURIComponent(session)}`
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setMessages(data.history || []);
+      }
+    } catch (err) {
+      console.error("Failed to load history", err);
     }
   };
 
@@ -255,7 +269,19 @@ function App() {
           </div>
 
           <div className="source-management">
-            <span className="section-label">Sources ({pdfs.length})</span>
+            <div className="section-header">
+              <span className="section-label">Sources ({pdfs.length})</span>
+              {pdfs.length > 0 && (
+                <button
+                  className="text-btn"
+                  onClick={() => setSelectedPdfs(
+                    selectedPdfs.length === pdfs.length ? [] : pdfs.map(p => p.filename)
+                  )}
+                >
+                  {selectedPdfs.length === pdfs.length ? 'Deselect All' : 'Select All'}
+                </button>
+              )}
+            </div>
 
             <div className="upload-zone" onClick={() => fileInputRef.current.click()}>
               <p>+ Add Document</p>

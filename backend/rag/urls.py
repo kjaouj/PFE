@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import ask_question, upload_pdf, list_pdfs, create_session, delete_pdf, list_sessions, delete_session
+from .views import ask_question, upload_pdf, list_pdfs, create_session, delete_pdf, list_sessions, delete_session, get_history
 
 urlpatterns = [
     path("ask/", ask_question, name="ask_question"),
@@ -8,5 +8,6 @@ urlpatterns = [
     path("session/", create_session, name="create_session"),
     path("sessions/", list_sessions, name="list_sessions"),
     path("session/<str:session_name>/", delete_session, name="delete_session"),
+    path("history/", get_history, name="get_history"),
     path("delete/", delete_pdf, name="delete_pdf"),
 ]

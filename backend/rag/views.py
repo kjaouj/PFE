@@ -333,3 +333,35 @@ def delete_pdf(request):
         {"message": f"Document '{filename}' deleted successfully"},
         status=status.HTTP_200_OK
     )
+
+
+@api_view(["GET"])
+def get_history(request):
+    session_name = request.GET.get("session")
+    if not session_name:
+        return Response({"error": "Session name required"}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        session = Session.objects.get(name=session_name)
+        questions = session.questions.all().order_by("created_at")
+        
+        history = []
+        for q in questions:
+            history.append({
+                "role": "user",
+                "text": q.text,
+            })
+            # Try to get the answer
+            try:
+                a = q.answer
+                history.append({
+                    "role": "assistant",
+                    "text": a.text,
+                    "citations": a.citations
+                })
+            except Answer.DoesNotExist:
+                pass
+                
+        return Response({"history": history}, status=status.HTTP_200_OK)
+    except Session.DoesNotExist:
+        return Response({"error": "Session not found"}, status=status.HTTP_404_NOT_FOUND)
