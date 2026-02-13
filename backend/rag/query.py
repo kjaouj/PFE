@@ -11,7 +11,7 @@ def ask_with_citations(
     session_name: str,
     sources=None,
     docs_override=None,
-    k: int = 5,
+    k: int = 8,  # Increased k for more context
 ):
     persist_dir = get_session_path(session_name)
     embeddings = OllamaEmbeddings(model="nomic-embed-text")
@@ -26,8 +26,15 @@ def ask_with_citations(
         docs = docs_override
 
     else:
-        # 2. Retrieve documents (STRICT filtering if sources provided)
-        if sources:
+        # Improved retrieval: if multiple sources, get a balanced set
+        if sources and len(sources) > 1:
+            all_docs = []
+            per_source_k = max(2, k // len(sources))
+            for src in sources:
+                sdocs = vectordb.similarity_search(question, k=per_source_k, filter={"source": src})
+                all_docs.extend(sdocs)
+            docs = all_docs
+        elif sources:
             docs = vectordb.similarity_search(
                 question,
                 k=k,
@@ -39,43 +46,50 @@ def ask_with_citations(
 
     if not docs:
         return {
-            "answer": "I cannot answer this question based on the selected document(s).",
+            "answer": "I cannot find any relevant sections in the selected documents to answer this question.",
             "citations": []
         }
 
-    # Normalize docs → text
-    context = "\n\n".join(
-        d.page_content if hasattr(d, "page_content") else d
-        for d in docs
-    )
+    # Normalize docs → text with source info
+    context_parts = []
+    for d in docs:
+        source = d.metadata.get("source", "unknown")
+        page = d.metadata.get("page", "?")
+        content = d.page_content if hasattr(d, "page_content") else d
+        context_parts.append(f"--- SOURCE: {source}, PAGE: {page} ---\n{content}")
+    
+    context = "\n\n".join(context_parts)
 
     llm = OllamaLLM(model="mistral")
 
-    prompt = f"""
-You are a scientific assistant.
+    prompt = f"""You are a precise scientific research assistant.
 
-Answer the question using ONLY the context below.
-If the answer is not explicitly present in the context,
-respond exactly with:
+INSTRUCTIONS:
+1. Answer the question using ONLY the provided context.
+2. If the answer isn't explicitly in the context but can be reasonably inferred based ONLY on the evidence provided, do so and state it is an inference.
+3. If you truly cannot find the answer, don't just say "I can't answer". Instead, briefly summarize what the documents DO say about the topic, then explain what specific information is missing.
+4. Use a professional, academic tone.
+5. If multiple documents are provided, compare their findings if relevant.
 
-"I cannot answer based on the provided documents."
-
-Context:
+CONTEXT:
 {context}
 
-Question:
+QUESTION:
 {question}
+
+THINKING PROCESS:
+(Analyze the context step-by-step before providing your final answer)
+
+ANSWER:
 """
 
-    answer = llm.invoke(prompt)
-
-    # citations = []
-    # for d in docs:
-    #     if hasattr(d, "metadata"):
-    #         citations.append({
-    #             "source": d.metadata.get("source"),
-    #             "page": d.metadata.get("page"),
-    #         })
+    response = llm.invoke(prompt)
+    
+    # Split to remove the thinking process from the final output if the model includes it
+    if "ANSWER:" in response:
+        final_answer = response.split("ANSWER:")[-1].strip()
+    else:
+        final_answer = response.strip()
 
     page_counts = Counter(
         (d.metadata.get("source"), d.metadata.get("page"))
@@ -92,9 +106,10 @@ Question:
     ]
 
     return {
-        "answer": answer,
+        "answer": final_answer,
         "citations": citations
     }
+
 
 
 def retrieve_paper_overview(

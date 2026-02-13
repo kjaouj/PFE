@@ -1,24 +1,84 @@
+import time
+import threading
 from pathlib import Path
 
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
+from django.utils import timezone
 
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
 
-from .models import Session, Document, Question, Answer
+from .models import Session, Document, Question, Answer, RunLog, PaperSource
 from .utils import get_default_session, normalize_filename
 from .query import ask_with_citations, retrieve_paper_overview
 from .ingest import ingest_pdf
 
+from .services.ingestion import IngestionService
+from .services.metrics import MetricsService
+from .services.synthesis import SynthesisService
+
 from .router import is_title_question, is_about_paper_question, is_page_count_question
+
+@api_view(["GET"])
+def document_status(request, document_id):
+    """
+    Get detailed status of a document ingestion.
+    """
+    try:
+        document = Document.objects.get(id=document_id)
+
+        processing_time = None
+        if document.processing_started_at and document.processing_completed_at:
+            processing_time = (
+                document.processing_completed_at - document.processing_started_at
+            ).total_seconds()
+
+        return Response({
+            "document_id": document.id,
+            "filename": document.filename,
+            "session": document.session.name,
+            "status": document.status,
+            "uploaded_at": document.uploaded_at,
+            "processing_started_at": document.processing_started_at,
+            "processing_completed_at": document.processing_completed_at,
+            "processing_time_seconds": processing_time,
+            "error_message": document.error_message,
+            "metadata": {
+                "title": document.title,
+                "abstract": document.abstract,
+                "page_count": document.page_count
+            }
+        }, status=status.HTTP_200_OK)
+
+    except Document.DoesNotExist:
+        return Response(
+            {"error": "Document not found"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+@api_view(["GET"])
+def metrics_summary(request):
+    """
+    Get aggregated metrics for monitoring dashboard.
+    """
+    since_days = request.GET.get("since", "7")
+    try:
+        since_days = int(since_days)
+    except ValueError:
+        since_days = 7
+
+    metrics_service = MetricsService()
+    summary = metrics_service.get_summary(since_days=since_days)
+    return Response(summary, status=status.HTTP_200_OK)
 
 @api_view(["POST"])
 def ask_question(request):
     question_text = request.data.get("question")
     session_name = request.data.get("session")
     sources = request.data.get("sources") or []
+    mode = request.data.get("mode", "qa")  # New: mode support
 
     if not question_text:
         return Response(
@@ -47,65 +107,133 @@ def ask_question(request):
         session=session
     )
 
+    start_time = time.time()
+    metrics_service = MetricsService()
+    synthesis_service = SynthesisService()
+    retrieved_chunks = []
+
     try:
-        # ===== METADATA QUESTIONS =====
-        if is_title_question(question_text) and sources:
-            doc = Document.objects.get(
-                session=session,
-                filename=sources[0]
+        if mode == "compare":
+            # Comparison mode logic
+            from langchain_chroma import Chroma
+            from langchain_ollama import OllamaEmbeddings
+            from .utils import get_session_path
+            
+            persist_dir = get_session_path(session.name)
+            embeddings = OllamaEmbeddings(model="nomic-embed-text")
+            vectordb = Chroma(persist_directory=persist_dir, embedding_function=embeddings)
+            
+            if sources and len(sources) > 1:
+                # Per-source retrieval to ensure multidocument awareness
+                all_docs = []
+                for src in sources:
+                    sdocs = vectordb.similarity_search(question_text, k=4, filter={"source": src})
+                    all_docs.extend(sdocs)
+                docs = all_docs
+            else:
+                docs = vectordb.similarity_search(question_text, k=10, filter={"source": {"$in": sources}} if sources else None)
+            
+            retrieved_chunks = [
+                {"doc": d.metadata.get("source"), "page": d.metadata.get("page"), "score": 0.0}
+                for d in docs
+            ]
+            
+            result = synthesis_service.compare_papers(question_text, docs, sources)
+            
+            Answer.objects.create(
+                question=question_obj,
+                text=f"Comparison on: {question_text}",
+                citations=[],
+                metadata=result
             )
-            answer_text = doc.title or "Title not available."
 
-            result = {
-                "answer": answer_text,
-                "citations": []
-            }
-
-        elif is_page_count_question(question_text) and sources:
-            doc = Document.objects.get(
-                session=session,
-                filename=sources[0]
-            )
-            count = doc.page_count or "unknown"
-            result = {
-                "answer": f"The document '{doc.filename}' has {count} pages.",
-                "citations": []
-            }
-
-        elif is_about_paper_question(question_text) and sources:
-            docs = retrieve_paper_overview(
-                question=question_text,
-                session_name=session.name,
-                source=sources[0],
-            )
-            result = ask_with_citations(
-                question=question_text,
-                session_name=session.name,
-                docs_override=docs,
+        elif mode == "lit_review":
+            from langchain_chroma import Chroma
+            from langchain_ollama import OllamaEmbeddings
+            from .utils import get_session_path
+            
+            persist_dir = get_session_path(session.name)
+            embeddings = OllamaEmbeddings(model="nomic-embed-text")
+            vectordb = Chroma(persist_directory=persist_dir, embedding_function=embeddings)
+            
+            if sources and len(sources) > 1:
+                all_docs = []
+                for src in sources:
+                    sdocs = vectordb.similarity_search(question_text, k=5, filter={"source": src})
+                    all_docs.extend(sdocs)
+                docs = all_docs
+            else:
+                docs = vectordb.similarity_search(question_text, k=15, filter={"source": {"$in": sources}} if sources else None)
+            
+            retrieved_chunks = [
+                {"doc": d.metadata.get("source"), "page": d.metadata.get("page"), "score": 0.0}
+                for d in docs
+            ]
+            
+            result = synthesis_service.generate_literature_review(question_text, docs, sources)
+            
+            Answer.objects.create(
+                question=question_obj,
+                text=result.get("content", ""),
+                citations=[],
+                metadata={
+                    "title": result.get("title"),
+                    "mode": "lit_review"
+                }
             )
 
         else:
-            # ===== DEFAULT RAG =====
-            result = ask_with_citations(
-                question=question_text,
-                session_name=session.name,
-                sources=sources or None,
-            )
+            # Existing QA Logic
+            if is_title_question(question_text) and sources:
+                doc = Document.objects.get(session=session, filename=sources[0])
+                result = {"answer": doc.title or "Title not available.", "citations": []}
+            elif is_page_count_question(question_text) and sources:
+                doc = Document.objects.get(session=session, filename=sources[0])
+                result = {"answer": f"The document '{doc.filename}' has {doc.page_count or 'unknown'} pages.", "citations": []}
+            elif is_about_paper_question(question_text) and sources:
+                docs = retrieve_paper_overview(question=question_text, session_name=session.name, source=sources[0])
+                result = ask_with_citations(question=question_text, session_name=session.name, docs_override=docs)
+            else:
+                result = ask_with_citations(question=question_text, session_name=session.name, sources=sources or None)
 
-        Answer.objects.create(
+            Answer.objects.create(
+                question=question_obj,
+                text=result["answer"],
+                citations=result["citations"]
+            )
+            
+            retrieved_chunks = [
+                {"doc": c["source"], "page": c["page"], "score": 0.0}
+                for c in result.get("citations", [])
+            ]
+
+        # Log metrics
+        latency_ms = int((time.time() - start_time) * 1000)
+        metrics_service.log_query(
+            session=session,
             question=question_obj,
-            text=result["answer"],
-            citations=result["citations"]
+            question_text=question_text,
+            mode=mode,
+            sources=sources,
+            latency_ms=latency_ms,
+            retrieved_chunks=retrieved_chunks
         )
 
         return Response(result, status=status.HTTP_200_OK)
 
     except Exception as e:
-        # 🔒 GUARANTEED JSON ERROR
-        return Response(
-            {"error": str(e)},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        latency_ms = int((time.time() - start_time) * 1000)
+        metrics_service.log_query(
+            session=session,
+            question=question_obj,
+            question_text=question_text,
+            mode=mode,
+            sources=sources,
+            latency_ms=latency_ms,
+            retrieved_chunks=retrieved_chunks,
+            error=e
         )
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 
@@ -114,11 +242,7 @@ def ask_question(request):
 @api_view(["POST"])
 def upload_pdf(request):
     """
-    Upload a PDF file and ingest it into a session-scoped vector database.
-
-    Expected form-data:
-    - file: PDF
-    - session: Session name (optional)
+    Upload a PDF file and trigger async ingestion.
     """
     file = request.FILES.get("file")
     session_name = request.POST.get("session")
@@ -155,31 +279,39 @@ def upload_pdf(request):
     )
 
     full_path = Path(default_storage.path(saved_path))
-    original_filename = file.name  # THIS is what users see
-
-
-    # Register document in relational DB
     normalized = normalize_filename(file.name)
 
-    document, _ = Document.objects.get_or_create(
+    # Register document in relational DB
+    document, created = Document.objects.get_or_create(
         filename=normalized,
         session=session
     )
 
-    # Ingest into session-scoped vector store
-    ingest_pdf(
-        path=str(full_path),
-        session_name=session.name,
-        document=document
-    )
+    # Reset status if re-uploading
+    if not created:
+        document.status = 'UPLOADED'
+        document.error_message = None
+        document.processing_started_at = None
+        document.processing_completed_at = None
+        document.save()
+
+    # Trigger async ingestion
+    def ingest_in_background():
+        service = IngestionService()
+        service.ingest_document(document.id, str(full_path))
+
+    thread = threading.Thread(target=ingest_in_background, daemon=True)
+    thread.start()
 
     return Response(
         {
-            "message": "PDF uploaded and ingested successfully",
+            "message": "PDF upload initiated. Processing in background.",
+            "document_id": document.id,
             "filename": file.name,
-            "session": session.name
+            "session": session.name,
+            "status": document.status
         },
-        status=status.HTTP_201_CREATED
+        status=status.HTTP_202_ACCEPTED
     )
 
 
@@ -202,12 +334,13 @@ def list_pdfs(request):
             status=status.HTTP_404_NOT_FOUND
         )
 
-    # pdfs = session.documents.values_list("filename", flat=True)
-
     pdfs = session.documents.values(
+        "id",
         "filename",
         "title",
-        "abstract"
+        "abstract",
+        "status",
+        "error_message"
     )
 
 
@@ -354,11 +487,19 @@ def get_history(request):
             # Try to get the answer
             try:
                 a = q.answer
-                history.append({
+                item = {
                     "role": "assistant",
                     "text": a.text,
                     "citations": a.citations
-                })
+                }
+                # Include metadata (comparison, title, etc.)
+                if a.metadata:
+                    if "claims" in a.metadata:
+                        item["comparison"] = a.metadata
+                    if "title" in a.metadata:
+                        item["title"] = a.metadata["title"]
+                
+                history.append(item)
             except Answer.DoesNotExist:
                 pass
                 
