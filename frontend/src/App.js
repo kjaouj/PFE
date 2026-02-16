@@ -10,7 +10,9 @@ function App() {
   const [selectedPdfs, setSelectedPdfs] = useState([]);
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState([]);
+  const [metrics, setMetrics] = useState(null);
   const [status, setStatus] = useState("");
+  const [mode, setMode] = useState("qa");
   const [loading, setLoading] = useState(false);
   const [theme, setTheme] = useState(localStorage.getItem("theme") || "dark");
   const fileInputRef = useRef(null);
@@ -36,8 +38,9 @@ function App() {
     if (session) {
       loadPdfs();
       loadHistory();
+      if (mode === 'monitoring') loadMetrics();
     }
-  }, [session]);
+  }, [session, mode]);
 
   // Scroll to bottom of chat
   useEffect(() => {
@@ -81,6 +84,18 @@ function App() {
       }
     } catch (err) {
       console.error("Failed to load PDFs", err);
+    }
+  };
+
+  const loadMetrics = async () => {
+    try {
+      const res = await fetch("http://127.0.0.1:8000/api/metrics/summary/");
+      if (res.ok) {
+        const data = await res.json();
+        setMetrics(data);
+      }
+    } catch (err) {
+      console.error("Failed to load metrics", err);
     }
   };
 
@@ -130,7 +145,6 @@ function App() {
     }
   };
 
-  const [mode, setMode] = useState("qa");
   const [arxivQuery, setArxivQuery] = useState("");
   const [searchSource, setSearchSource] = useState("arxiv"); // New: arxiv, pubmed, semanticscholar
   const [arxivResults, setArxivResults] = useState([]);
@@ -518,7 +532,7 @@ function App() {
       {/* Main Content */}
       <main className="main-content">
         <div className="mode-selector">
-          {['qa', 'compare', 'lit_review'].map(m => (
+          {['qa', 'compare', 'lit_review', 'monitoring'].map(m => (
             <button
               key={m}
               className={`mode-btn ${mode === m ? 'active' : ''}`}
@@ -531,7 +545,39 @@ function App() {
         {status && <div className="status-indicator">{status}</div>}
 
         <div className="chat-container">
-          {messages.length === 0 ? (
+          {mode === 'monitoring' ? (
+            <div className="monitoring-dashboard">
+              <h2>System Monitoring</h2>
+              {metrics ? (
+                <div className="metrics-grid">
+                  <div className="metric-card">
+                    <h3>Average Latency</h3>
+                    <p className="metric-value">{metrics.queries.latency_avg_ms}ms</p>
+                  </div>
+                  <div className="metric-card">
+                    <h3>Total Queries</h3>
+                    <p className="metric-value">{metrics.queries.total}</p>
+                  </div>
+                  <div className="metric-card">
+                    <h3>Error Rate</h3>
+                    <p className="metric-value">{(metrics.errors.rate * 100).toFixed(1)}%</p>
+                  </div>
+                  <div className="metric-card">
+                    <h3>Active Sessions</h3>
+                    <p className="metric-value">{metrics.sessions.active_count}</p>
+                  </div>
+                  <div className="metric-info-full">
+                    <h4>Queries by Mode</h4>
+                    <ul>
+                      {Object.entries(metrics.queries.by_mode || {}).map(([m, count]) => (
+                        <li key={m}><strong>{m.toUpperCase()}:</strong> {count}</li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              ) : <p>Loading metrics...</p>}
+            </div>
+          ) : messages.length === 0 ? (
             <div className="welcome-screen">
               <h2>Welcome to your research workspace</h2>
               <p>Upload scientific papers, select them as context, and ask questions with strict citation grounding.</p>
@@ -582,24 +628,26 @@ function App() {
           <div ref={chatEndRef} />
         </div>
 
-        <div className="input-area">
-          <form onSubmit={askQuestion} className="chat-input-wrapper">
-            <input
-              type="text"
-              placeholder={selectedPdfs.length > 0 ? `Ask a question in ${mode.replace('_', ' ').toUpperCase()} mode...` : "Select a source to start asking questions"}
-              value={question}
-              onChange={(e) => setQuestion(e.target.value)}
-              disabled={loading}
-            />
-            <button
-              type="submit"
-              className="btn-icon"
-              disabled={loading || !question.trim()}
-            >
-              ➔
-            </button>
-          </form>
-        </div>
+        {mode !== 'monitoring' && (
+          <div className="input-area">
+            <form onSubmit={askQuestion} className="chat-input-wrapper">
+              <input
+                type="text"
+                placeholder={selectedPdfs.length > 0 ? `Ask a question in ${mode.replace('_', ' ').toUpperCase()} mode...` : "Select a source to start asking questions"}
+                value={question}
+                onChange={(e) => setQuestion(e.target.value)}
+                disabled={loading}
+              />
+              <button
+                type="submit"
+                className="btn-icon"
+                disabled={loading || !question.trim()}
+              >
+                ➔
+              </button>
+            </form>
+          </div>
+        )}
       </main>
     </div>
   );

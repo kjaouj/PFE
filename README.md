@@ -1,155 +1,103 @@
-# Scientific Research Navigator
+# 🧪 Scientific Research Navigator
 
-A **session-based Retrieval-Augmented Generation (RAG)** system for exploring and querying scientific PDFs with strict grounding and citation support.
+A **session-based Retrieval-Augmented Generation (RAG)** system designed for researchers to explore, analyze, and synthesize scientific literature with strict grounding and citation support.
 
-This project allows users to:
-- Upload scientific papers (PDF)
-- Organize them into **sessions**
-- Ask questions grounded **only** in selected documents
-- Prevent hallucinations via strict retrieval constraints
-- View exact source citations (PDF + page)
 
 ---
 
-##  Features Implemented
+## 🚀 Key Features
 
-###  Session-based document management
-- Each session has its own:
-  - PDF list
-  - Vector store (Chroma)
-- No cross-session contamination
+### 📂 Isolated Research Sessions
+- **Contextual Integrity**: Each session maintains its own isolated vector store (Chroma), document list, and conversation history.
+- **No Contamination**: Researching "Quantum Computing" in one session won't bleed into your "Molecular Biology" session.
+- **Full Lifecycle Management**: Create, rename, and delete sessions with automatic cleanup of associated vectors and files.
 
-###  Robust PDF ingestion
-- PDFs are split into semantic chunks
-- Each chunk is enriched with:
-  - `source` (filename)
-  - `page` number
-- Stored in a **session-scoped Chroma vector store**
+### 🌐 Multi-Source Document Ingestion
+- **Local Uploads**: Process scientific PDFs with semantic chunking and metadata enrichment.
+- **External Integration**: Search and import papers directly into your session from:
+  - **arXiv** (General Science)
+  - **PubMed** (Life Sciences & Bio-medical)
+  - **Semantic Scholar** (Cross-disciplinary)
+  - **ACL Anthology** (Computational Linguistics & NLP)
+  - **medRxiv** (Health Sciences)
+- **Background Processing**: Real-time status tracking (Uploaded → Processing → Indexed).
 
-###  Strict RAG pipeline
-- Semantic retrieval via `nomic-embed-text`
-- LLM: `mistral` (via Ollama)
-- **Hard grounding**:
-  - If the answer is not in retrieved context → model refuses to answer
-- Citations returned for every answer
+### 🧠 Advanced RAG Modes
+- **QA Mode**: Traditional question answering with strict grounding—model refuses to answer if evidence is missing in the retrieved context.
+- **Compare Mode**: Automated cross-paper analysis identifying claims and stances across multiple documents.
+- **Literature Review**: High-level synthesis of selected papers to generate cohesive research summaries.
+- **Strict Citations**: Every answer includes page-level citations linked to the source PDF.
 
-###  Hallucination control
-- No guessing
-- No title or metadata hallucination
-- Source filtering enforced
-
-###  REST API (Django + DRF)
-- Upload PDFs
-- List session PDFs
-- Ask session-scoped questions
+### 📊 Monitoring & Performance
+- **Metrics Dashboard**: Track query latency, ingestion times, and retrieval accuracy.
+- **Run Logs**: Detailed audit of every LLM interaction and retrieval step.
 
 ---
 
-##  Architecture Overview
-```
-Frontend
-↓
-Django REST API
-↓
-Session Resolver
-↓
-Chroma (per session)
-↓
-Retriever → Context
-↓
-LLM (Ollama)
+## 🛠️ Tech Stack
 
-```
+- **Backend**: Django 6.0+, Django REST Framework (DRF)
+- **LLM Engine**: Ollama (Mistral 7B)
+- **Embeddings**: Nomic-Embed-Text
+- **Vector DB**: ChromaDB
+- **Frontend**: React.js with a modern Dark/Light mode interface
+- **Task Handling**: Threaded background ingestion
 
 ---
 
-##  Tech Stack
+## 📦 Setup Instructions
 
-- **Backend**: Django, Django REST Framework
-- **RAG**: LangChain, Chroma
-- **Embeddings**: nomic-embed-text
-- **LLM**: Mistral (via Ollama)
-- **Frontend**: Simple web UI
-- **Storage**:
-  - PDFs: filesystem
-  - Vectors: Chroma (per session)
+### 1. Prerequisites
+- **Python 3.10+**
+- **Node.js & npm**
+- **Ollama** installed and running
 
----
-
-##  Setup Instructions
-
-###  Prerequisites
-
-- Python 3.10+
-- Ollama installed and running
-
-Pull required models:
+### 2. Prepare Models
 ```bash
 ollama pull mistral
 ollama pull nomic-embed-text
 ```
 
-
-### Clone the repository
-```
-git clone https://github.com/<username>/scientific-navigator.git
-cd scientific-navigator
-```
-
-###  Create virtual environment
-```
-python -m venv venv
-source venv/bin/activate
-```
-
-###  Install dependencies
-```
-pip install -r requirements.txt
-```
-
-###  Run database migrations
-```
+### 3. Backend Setup
+```bash
 cd backend
-python manage.py migrate
-```
+python -m venv venv
+# Windows:
+.\venv\Scripts\activate
+# Linux/Mac:
+source venv/bin/activate
 
-###  Start the backend
-```
+pip install -r requirements.txt
+python manage.py migrate
 python manage.py runserver
 ```
+*Backend runs at `http://127.0.0.1:8000`*
 
-Backend available at: http://127.0.0.1:8000
+### 4. Frontend Setup
+```bash
+cd frontend
+npm install
+npm start
+```
+*Frontend runs at `http://localhost:3000`*
 
-## API Usage
-### Upload PDFs
-```
-POST /api/upload/
-```
+---
 
-Form-data:
-- file: PDF
-- session: Session name
+## 🏗️ Architecture Overview
 
-### List PDFs in a session
-```
-GET /api/pdfs/?session=SessionA
-```
-
-### Ask a question
-```
-POST /api/ask/
-```
-```
-{
-  "question": "What is this paper about?",
-  "session": "SessionA",
-  "sources": ["paper1.pdf"]
-}
+```mermaid
+graph TD
+    UI[React Frontend] -->|API Requests| Django[Django REST API]
+    Django -->|Models| SQLite[(Relational DB)]
+    Django -->|Chunks| Chroma[(Chroma Vector Store)]
+    Django -->|Prompts| Ollama(Mistral / Nomic Embed)
+    Chroma -->|Context| Retriever[Retriever]
+    Retriever -->|Grounded Answer| UI
 ```
 
-⚠️ Known Design Choice
+---
 
-- Metadata-level questions (e.g. title, authors) are not guaranteed
-unless explicitly present in retrieved text.
-
-- This is intentional to avoid hallucinations.
+## ⚠️ Important Notes
+- **Hardware Acceleration**: GPU acceleration for Ollama is highly recommended for viable latencies.
+- **Hallucination Control**: The system is intentionally conservative. If it cannot find a definitive answer in the provided sources, it will state so rather than hallucinating metadata or content.
+- **Environment**: This project is optimized for Windows (WSL) and Linux environments.

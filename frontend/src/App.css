@@ -465,15 +465,25 @@ input[type="text"]:focus {
 .upload-zone {
   border: 2px dashed var(--border);
   border-radius: 12px;
-  padding: 20px;
+  padding: 16px;
   text-align: center;
   margin-bottom: 24px;
-  transition: border-color 0.2s;
+  transition: all 0.2s;
   cursor: pointer;
+  background: var(--glass);
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 0.9rem;
 }
 
 .upload-zone:hover {
   border-color: var(--accent);
+  background: rgba(108, 99, 255, 0.08);
+  transform: translateY(-1px);
+}
+
+.muted {
+  color: var(--text-muted);
 }
 
 .hide-input {
@@ -896,4 +906,97 @@ input[type="text"]:focus {
 .theme-toggle:hover {
   background: var(--glass);
   border-color: var(--accent);
+}
+
+/* MONITORING DASHBOARD */
+.monitoring-dashboard {
+  padding: 20px;
+  animation: fadeIn 0.5s ease-out;
+}
+
+.monitoring-dashboard h2 {
+  margin-bottom: 24px;
+  color: var(--accent);
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 20px;
+}
+
+.metric-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  text-align: center;
+  transition: transform 0.2s;
+}
+
+.metric-card:hover {
+  transform: translateY(-4px);
+  border-color: var(--accent);
+}
+
+.metric-card h3 {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+
+.metric-value {
+  font-size: 2rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.metric-info-full {
+  grid-column: 1 / -1;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  margin-top: 10px;
+  color: var(--text-primary);
+}
+
+.metric-info-full h4 {
+  margin-bottom: 16px;
+  font-size: 1.1rem;
+  color: var(--accent);
+}
+
+.metric-info-full ul {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+}
+
+.metric-info-full li {
+  background: var(--bg-input);
+  padding: 10px;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+
+.metric-info-full li strong {
+  color: var(--text-primary);
+}
+
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
