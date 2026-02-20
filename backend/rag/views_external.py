@@ -81,25 +81,38 @@ def external_import(request):
     provider = request.data.get('source', 'arxiv').lower()
     session_name = request.data.get('session', '').strip()
 
-    if not paper_id or not session_name:
-        return Response({'error': 'id and session are required'}, status=status.HTTP_400_BAD_REQUEST)
+    if not paper_id:
+        return Response({'error': 'id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+    from .models import Session
+    from .utils import get_default_session
+
+    # Resolve session
+    try:
+        session = (
+            Session.objects.get(name=session_name)
+            if session_name
+            else get_default_session()
+        )
+    except Session.DoesNotExist:
+        return Response({'error': f'Session {session_name} not found'}, status=status.HTTP_404_NOT_FOUND)
 
     try:
         if provider == 'arxiv':
             service = ArxivService()
-            result = service.import_paper(arxiv_id=paper_id, session_name=session_name)
+            result = service.import_paper(arxiv_id=paper_id, session_name=session.name)
         elif provider == 'pubmed':
             service = PubmedService()
-            result = service.import_paper(pubmed_id=paper_id, session_name=session_name)
+            result = service.import_paper(pubmed_id=paper_id, session_name=session.name)
         elif provider == 'semanticscholar':
             service = SemanticScholarService()
-            result = service.import_paper(paper_id=paper_id, session_name=session_name)
+            result = service.import_paper(paper_id=paper_id, session_name=session.name)
         elif provider == 'acl':
             service = ACLService()
-            result = service.import_paper(paper_id=paper_id, session_name=session_name)
+            result = service.import_paper(paper_id=paper_id, session_name=session.name)
         elif provider == 'medrxiv':
             service = MedRxivService()
-            result = service.import_paper(paper_id=paper_id, session_name=session_name)
+            result = service.import_paper(paper_id=paper_id, session_name=session.name)
         else:
             return Response({'error': f'Unsupported provider: {provider}'}, status=status.HTTP_400_BAD_REQUEST)
 

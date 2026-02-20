@@ -57,11 +57,31 @@ class MetricsService:
         logs = RunLog.objects.filter(created_at__gte=start_date)
 
         total_queries = logs.count()
-        if total_queries == 0:
-            return {
-                "period": {"days": since_days},
-                "queries": {"total": 0}
+        
+        # Base summary structure
+        summary = {
+            "period": {
+                "start": start_date,
+                "end": timezone.now(),
+                "days": since_days
+            },
+            "queries": {
+                "total": total_queries,
+                "by_mode": {},
+                "latency_avg_ms": 0,
+            },
+            "errors": {
+                "count": 0,
+                "rate": 0.0,
+                "top_errors": []
+            },
+            "sessions": {
+                "active_count": Session.objects.filter(run_logs__created_at__gte=start_date).distinct().count()
             }
+        }
+
+        if total_queries == 0:
+            return summary
 
         # Query stats
         by_mode = logs.values('mode').annotate(count=Count('id'))
@@ -72,26 +92,12 @@ class MetricsService:
         error_count = errors.count()
         top_errors = errors.values('error_type').annotate(count=Count('id')).order_by('-count')[:5]
 
-        # Retrieval stats
-        # (This is simplified as retrieved_chunks is JSON)
+        # Update summary with actual stats
+        summary["queries"]["by_mode"] = {item['mode']: item['count'] for item in by_mode}
+        summary["queries"]["latency_avg_ms"] = int(latency_avg or 0)
         
-        return {
-            "period": {
-                "start": start_date,
-                "end": timezone.now(),
-                "days": since_days
-            },
-            "queries": {
-                "total": total_queries,
-                "by_mode": {item['mode']: item['count'] for item in by_mode},
-                "latency_avg_ms": int(latency_avg or 0),
-            },
-            "errors": {
-                "count": error_count,
-                "rate": round(error_count / total_queries, 3),
-                "top_errors": list(top_errors)
-            },
-            "sessions": {
-                "active_count": Session.objects.filter(run_logs__created_at__gte=start_date).distinct().count()
-            }
-        }
+        summary["errors"]["count"] = error_count
+        summary["errors"]["rate"] = round(error_count / total_queries, 3)
+        summary["errors"]["top_errors"] = list(top_errors)
+        
+        return summary

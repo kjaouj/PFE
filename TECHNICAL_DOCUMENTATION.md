@@ -1,10 +1,10 @@
-# 📄 Technical Documentation: Scientific Research Navigator
+# Technical Documentation: Scientific Research Navigator
 
 This document provides a deep dive into the architecture, component roles, and strategic roadmap for the Scientific Research Navigator project. It is designed to serve as both a developer guide and a reference for the Mid-Course Defense.
 
 ---
 
-## 🎯 1. MVP & Concept
+## 1. MVP & Concept
 **Core Statement**: A session-based RAG system that provides researchers with a "cognitive workspace" where they can ingest, query, and compare scientific papers with strict adherence to source material and zero-tolerance for hallucinations.
 
 ### User Scenarios
@@ -14,7 +14,7 @@ This document provides a deep dive into the architecture, component roles, and s
 
 ---
 
-## 🏗️ 2. Functional Flow & Architecture
+## 2. Functional Flow & Architecture
 
 The system follows a classic **Retrieval-Augmented Generation (RAG)** pipeline, modularized for multi-document and multi-source handling.
 
@@ -27,7 +27,7 @@ The system follows a classic **Retrieval-Augmented Generation (RAG)** pipeline, 
 
 ---
 
-## 📊 3. Data Strategy
+## 3. Data Strategy
 ### Data Sources
 - **Internal**: Local PDF files uploaded by the user.
 - **External**: Integrated APIs for real-time scientific discovery:
@@ -43,7 +43,7 @@ The system follows a classic **Retrieval-Augmented Generation (RAG)** pipeline, 
 
 ---
 
-## 🧠 4. Machine Learning Strategy
+## 4. Machine Learning Strategy
 ### Models
 - **Embeddings (Baseline)**: `nomic-embed-text` (v1.5). Chosen for its 8k context window and high performance in document retrieval.
 - **LLM (Core)**: `Mistral-7B` (via Ollama). Used for its balance of reasoning capability and local performance. 
@@ -54,7 +54,7 @@ By running local models (Mistral/Nomic), we ensure **data privacy** for sensitiv
 
 ---
 
-## 📈 5. Evaluation Strategy
+## 5. Evaluation Strategy
 The system uses a **Monitoring-based Evaluation** approach via the `MetricsService`.
 
 - **Metrics Tracked**:
@@ -67,7 +67,7 @@ The system uses a **Monitoring-based Evaluation** approach via the `MetricsServi
 
 ---
 
-## 🛠️ 6. Technical Component Reference
+## 6. Technical Component Reference
 
 ### Backend (Django)
 | Script/Module | Role |
@@ -89,7 +89,7 @@ The system uses a **Monitoring-based Evaluation** approach via the `MetricsServi
 
 ---
 
-## 📅 7. Roadmap (Plan pour la suite)
+## 7. Roadmap (Plan pour la suite)
 - **Phase 1 (Current)**: Multi-source search and basic QA/Compare modes operational.
 - **Phase 2 (Late Feb)**: Implement recursive retrieval for better handling of complex questions. Enhance metadata extraction (Author, DOI).
 - **Phase 3 (March)**: Interactive PDF Viewer (viewer.js) to highlight cited text directly in the browser.

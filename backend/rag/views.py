@@ -471,11 +471,13 @@ def delete_pdf(request):
 @api_view(["GET"])
 def get_history(request):
     session_name = request.GET.get("session")
-    if not session_name:
-        return Response({"error": "Session name required"}, status=status.HTTP_400_BAD_REQUEST)
-
+    
     try:
-        session = Session.objects.get(name=session_name)
+        session = (
+            Session.objects.get(name=session_name)
+            if session_name
+            else get_default_session()
+        )
         questions = session.questions.all().order_by("created_at")
         
         history = []

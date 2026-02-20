@@ -1,18 +1,18 @@
-# 🧪 Scientific Research Navigator
+# Scientific Research Navigator
 
 A **session-based Retrieval-Augmented Generation (RAG)** system designed for researchers to explore, analyze, and synthesize scientific literature with strict grounding and citation support.
 
 
 ---
 
-## 🚀 Key Features
+## Key Features
 
-### 📂 Isolated Research Sessions
+### Isolated Research Sessions
 - **Contextual Integrity**: Each session maintains its own isolated vector store (Chroma), document list, and conversation history.
 - **No Contamination**: Researching "Quantum Computing" in one session won't bleed into your "Molecular Biology" session.
 - **Full Lifecycle Management**: Create, rename, and delete sessions with automatic cleanup of associated vectors and files.
 
-### 🌐 Multi-Source Document Ingestion
+### Multi-Source Document Ingestion
 - **Local Uploads**: Process scientific PDFs with semantic chunking and metadata enrichment.
 - **External Integration**: Search and import papers directly into your session from:
   - **arXiv** (General Science)
@@ -22,19 +22,19 @@ A **session-based Retrieval-Augmented Generation (RAG)** system designed for res
   - **medRxiv** (Health Sciences)
 - **Background Processing**: Real-time status tracking (Uploaded → Processing → Indexed).
 
-### 🧠 Advanced RAG Modes
+### Advanced RAG Modes
 - **QA Mode**: Traditional question answering with strict grounding—model refuses to answer if evidence is missing in the retrieved context.
 - **Compare Mode**: Automated cross-paper analysis identifying claims and stances across multiple documents.
 - **Literature Review**: High-level synthesis of selected papers to generate cohesive research summaries.
 - **Strict Citations**: Every answer includes page-level citations linked to the source PDF.
 
-### 📊 Monitoring & Performance
+### Monitoring & Performance
 - **Metrics Dashboard**: Track query latency, ingestion times, and retrieval accuracy.
 - **Run Logs**: Detailed audit of every LLM interaction and retrieval step.
 
 ---
 
-## 🛠️ Tech Stack
+## Tech Stack
 
 - **Backend**: Django 6.0+, Django REST Framework (DRF)
 - **LLM Engine**: Ollama (Mistral 7B)
@@ -45,7 +45,7 @@ A **session-based Retrieval-Augmented Generation (RAG)** system designed for res
 
 ---
 
-## 📦 Setup Instructions
+## Setup Instructions
 
 ### 1. Prerequisites
 - **Python 3.10+**
@@ -83,7 +83,7 @@ npm start
 
 ---
 
-## 🏗️ Architecture Overview
+## Architecture Overview
 
 ```mermaid
 graph TD
@@ -97,7 +97,7 @@ graph TD
 
 ---
 
-## ⚠️ Important Notes
+## Important Notes
 - **Hardware Acceleration**: GPU acceleration for Ollama is highly recommended for viable latencies.
 - **Hallucination Control**: The system is intentionally conservative. If it cannot find a definitive answer in the provided sources, it will state so rather than hallucinating metadata or content.
 - **Environment**: This project is optimized for Windows (WSL) and Linux environments.

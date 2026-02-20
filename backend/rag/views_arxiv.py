@@ -35,12 +35,24 @@ def arxiv_import(request):
     session_name = request.data.get('session', '').strip()
     download_pdf = request.data.get('download_pdf', True)
 
-    if not arxiv_id or not session_name:
-        return Response({'error': 'arxiv_id and session are required'}, status=status.HTTP_400_BAD_REQUEST)
+    if not arxiv_id:
+        return Response({'error': 'arxiv_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+    from .models import Session
+    from .utils import get_default_session
+
+    try:
+        session = (
+            Session.objects.get(name=session_name)
+            if session_name
+            else get_default_session()
+        )
+    except Session.DoesNotExist:
+        return Response({'error': f'Session {session_name} not found'}, status=status.HTTP_404_NOT_FOUND)
 
     try:
         service = ArxivService()
-        result = service.import_paper(arxiv_id=arxiv_id, session_name=session_name, download_pdf=download_pdf)
+        result = service.import_paper(arxiv_id=arxiv_id, session_name=session.name, download_pdf=download_pdf)
         return Response(result, status=status.HTTP_202_ACCEPTED)
     except Exception as e:
         logger.error(f"arXiv import failed: {e}")

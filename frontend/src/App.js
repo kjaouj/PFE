@@ -38,7 +38,9 @@ function App() {
     if (session) {
       loadPdfs();
       loadHistory();
-      if (mode === 'monitoring') loadMetrics();
+    }
+    if (mode === 'monitoring') {
+      loadMetrics();
     }
   }, [session, mode]);
 
@@ -564,7 +566,7 @@ function App() {
                   </div>
                   <div className="metric-card">
                     <h3>Active Sessions</h3>
-                    <p className="metric-value">{metrics.sessions.active_count}</p>
+                    <p className="metric-value">{metrics.sessions?.active_count ?? 0}</p>
                   </div>
                   <div className="metric-info-full">
                     <h4>Queries by Mode</h4>
