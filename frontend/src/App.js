@@ -21,6 +21,8 @@ function App() {
   const [highlightTags, setHighlightTags] = useState("");
   const [highlightSearch, setHighlightSearch] = useState("");
   const [highlightSearchResults, setHighlightSearchResults] = useState([]);
+  const [highlightSearchLoading, setHighlightSearchLoading] = useState(false);
+  const [isPdfDrawerFullscreen, setIsPdfDrawerFullscreen] = useState(false);
   const fileInputRef = useRef(null);
   const chatEndRef = useRef(null);
 
@@ -60,6 +62,22 @@ function App() {
       loadHighlightsForDocument(pdfViewer.filename);
     }
   }, [pdfViewer?.filename, pdfs]);
+
+  useEffect(() => {
+    const q = highlightSearch.trim();
+    if (!session || !q) {
+      setHighlightSearchResults([]);
+      setHighlightSearchLoading(false);
+      return;
+    }
+
+    setHighlightSearchLoading(true);
+    const timer = setTimeout(() => {
+      runHighlightSearch(q);
+    }, 350);
+
+    return () => clearTimeout(timer);
+  }, [highlightSearch, session]);
 
   const loadSessions = async () => {
     try {
@@ -178,6 +196,7 @@ function App() {
       viewerUrl,
       precisePhrase,
     });
+    setIsPdfDrawerFullscreen(false);
   };
 
   const loadHighlightsForDocument = async (filename) => {
@@ -244,21 +263,32 @@ function App() {
     }
   };
 
-  const searchMyHighlights = async (e) => {
-    e?.preventDefault();
-    if (!highlightSearch.trim() || !session) return;
-
+  const runHighlightSearch = async (query) => {
+    if (!query || !session) return;
     try {
       const res = await fetch(
-        `http://127.0.0.1:8000/api/highlights/search/?session=${encodeURIComponent(session)}&q=${encodeURIComponent(highlightSearch)}`
+        `http://127.0.0.1:8000/api/highlights/search/?session=${encodeURIComponent(session)}&q=${encodeURIComponent(query)}`
       );
       const data = await res.json();
       if (res.ok) {
         setHighlightSearchResults(data.results || []);
+      } else {
+        setHighlightSearchResults([]);
       }
     } catch (err) {
       console.error("Highlight search failed", err);
+      setHighlightSearchResults([]);
+    } finally {
+      setHighlightSearchLoading(false);
     }
+  };
+
+  const searchMyHighlights = async (e) => {
+    e?.preventDefault();
+    const q = highlightSearch.trim();
+    if (!q || !session) return;
+    setHighlightSearchLoading(true);
+    await runHighlightSearch(q);
   };
 
   const handleCreateSession = async (e) => {
@@ -420,7 +450,8 @@ function App() {
           setMessages(prev => [...prev, {
             role: "assistant",
             text: `Comparison for: "${question}"`,
-            comparison: data
+            comparison: data,
+            citations: data.citations || [],
           }]);
         } else if (mode === "lit_review") {
           setMessages(prev => [...prev, {
@@ -480,6 +511,26 @@ function App() {
       }
     } catch (err) {
       console.error("Delete failed", err);
+    }
+  };
+
+  const retryPdfIngestion = async (e, pdf) => {
+    e.stopPropagation();
+    setStatus(`Retrying ingestion for ${pdf.filename}...`);
+    try {
+      const res = await fetch(
+        `http://127.0.0.1:8000/api/documents/${pdf.id}/retry/`,
+        { method: "POST" }
+      );
+      const data = await res.json();
+      if (res.ok) {
+        setStatus(data.message || "Retry initiated");
+        await loadPdfs();
+      } else {
+        setStatus(data.error || "Retry failed");
+      }
+    } catch (err) {
+      setStatus("Retry failed");
     }
   };
 
@@ -672,12 +723,24 @@ function App() {
                         </span>
                       </span>
                     </div>
-                    <button
-                      className="delete-source-btn"
-                      onClick={(e) => deletePdf(e, pdf.filename)}
-                    >
-                      &times;
-                    </button>
+                    <div className="source-actions">
+                      {pdf.status === "FAILED" && (
+                        <button
+                          className="retry-source-btn"
+                          onClick={(e) => retryPdfIngestion(e, pdf)}
+                          title="Retry ingestion"
+                        >
+                          Retry
+                        </button>
+                      )}
+                      <button
+                        className="delete-source-btn"
+                        onClick={(e) => deletePdf(e, pdf.filename)}
+                        title="Delete source"
+                      >
+                        &times;
+                      </button>
+                    </div>
                   </div>
                 );
               })}
@@ -717,6 +780,7 @@ function App() {
               />
               <button className="btn-icon" type="submit">Go</button>
             </form>
+            {highlightSearchLoading && <p className="muted">Searching highlights...</p>}
             {highlightSearchResults.length > 0 && (
               <div className="global-highlight-results">
                 {highlightSearchResults.slice(0, 5).map((hl) => (
@@ -810,6 +874,11 @@ function App() {
                   {msg.comparison ? (
                     <div className="comparison-view">
                       <h4>{msg.text}</h4>
+                      {msg.comparison.message && (
+                        <p className="muted" style={{ marginBottom: "12px" }}>
+                          {msg.comparison.message}
+                        </p>
+                      )}
                       {msg.comparison.claims?.map((c, idx) => (
                         <div key={idx} className="claim-card">
                           <p className="claim-text"><strong>Claim:</strong> {c.claim}</p>
@@ -836,11 +905,15 @@ function App() {
                       {msg.citations.map((c, j) => (
                         <button
                           key={j}
-                          className="citation-chip clickable"
+                          className={`citation-chip clickable ${j === 0 ? "top-evidence" : ""}`}
                           onClick={() => openCitationViewer(c)}
                           title={c.snippet || "Open citation in PDF viewer"}
                         >
                           View {c.source} (p.{Number(c.page || 0) + 1})
+                          {typeof c.score === "number" && (
+                            <span className="citation-score">{c.score.toFixed(3)}</span>
+                          )}
+                          {j === 0 && <span className="citation-best">Best</span>}
                         </button>
                       ))}
                     </div>
@@ -853,18 +926,29 @@ function App() {
         </div>
 
         {pdfViewer && (
-          <div className="pdf-drawer">
+          <div className={`pdf-drawer ${isPdfDrawerFullscreen ? "fullscreen" : ""}`}>
             <div className="pdf-drawer-header">
               <div>
                 <strong>{pdfViewer.filename}</strong>
                 <p>Page {pdfViewer.page}</p>
               </div>
-              <button
-                className="text-btn"
-                onClick={() => setPdfViewer(null)}
-              >
-                Close
-              </button>
+              <div className="pdf-drawer-actions">
+                <button
+                  className="text-btn"
+                  onClick={() => setIsPdfDrawerFullscreen((v) => !v)}
+                >
+                  {isPdfDrawerFullscreen ? "Windowed" : "Fullscreen"}
+                </button>
+                <button
+                  className="text-btn"
+                  onClick={() => {
+                    setPdfViewer(null);
+                    setIsPdfDrawerFullscreen(false);
+                  }}
+                >
+                  Close
+                </button>
+              </div>
             </div>
 
             <iframe
@@ -932,6 +1016,7 @@ function App() {
                 />
                 <button className="btn-icon" type="submit">Go</button>
               </form>
+              {highlightSearchLoading && <p className="muted">Searching highlights...</p>}
               <div className="highlight-list">
                 {highlightSearchResults.map((hl) => (
                   <button

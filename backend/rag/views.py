@@ -120,6 +120,86 @@ def document_page_text(request, document_id):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
+
+@api_view(["POST"])
+def retry_document_ingestion(request, document_id):
+    """
+    Retry ingestion for a document that failed or was interrupted.
+    """
+    try:
+        document = Document.objects.get(id=document_id)
+    except Document.DoesNotExist:
+        return Response(
+            {"error": "Document not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    if document.status == "PROCESSING":
+        return Response(
+            {"error": "Document is already processing"},
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    # Reset status before retry
+    document.status = "UPLOADED"
+    document.error_message = None
+    document.processing_started_at = None
+    document.processing_completed_at = None
+    document.save(
+        update_fields=[
+            "status",
+            "error_message",
+            "processing_started_at",
+            "processing_completed_at",
+        ]
+    )
+
+    def retry_in_background(doc_id: int):
+        service = IngestionService()
+        try:
+            doc = Document.objects.get(id=doc_id)
+            file_path = Path(default_storage.path(f"pdfs/{doc.filename}"))
+
+            if file_path.exists():
+                service.ingest_document(doc.id, str(file_path))
+                return
+
+            # Metadata-only fallback for imported records without local PDF
+            paper_source = getattr(doc, "paper_source", None)
+            if paper_source and (paper_source.abstract or doc.abstract):
+                service.ingest_metadata_only(
+                    document_id=doc.id,
+                    title=(paper_source.title or doc.title or doc.filename),
+                    abstract=(paper_source.abstract or doc.abstract or ""),
+                    authors=(paper_source.authors or ""),
+                )
+                return
+
+            raise FileNotFoundError("No local PDF found and no metadata fallback available")
+        except Exception as exc:
+            logger.error(f"Retry ingestion failed for document {doc_id}: {exc}")
+            try:
+                failed_doc = Document.objects.get(id=doc_id)
+                failed_doc.status = "FAILED"
+                failed_doc.error_message = str(exc)
+                failed_doc.save(update_fields=["status", "error_message"])
+            except Exception:
+                pass
+
+    thread = threading.Thread(
+        target=retry_in_background, args=(document.id,), daemon=True
+    )
+    thread.start()
+
+    return Response(
+        {
+            "message": "Retry initiated",
+            "document_id": document.id,
+            "status": document.status,
+        },
+        status=status.HTTP_202_ACCEPTED,
+    )
+
 @api_view(["GET"])
 def metrics_summary(request):
     """
@@ -150,6 +230,15 @@ def ask_question(request):
 
     # Normalize sources
     sources = [normalize_filename(s) for s in sources]
+
+    if mode == "compare" and len(set(sources or [])) < 2:
+        return Response(
+            {
+                "error": "Compare mode requires at least 2 distinct selected documents.",
+                "message": "Select at least 2 papers, then run compare again.",
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     # Resolve session
     try:
@@ -182,35 +271,84 @@ def ask_question(request):
 
     try:
         if mode == "compare":
-            # ---- COMPARE MODE — hybrid retrieval ----
+            distinct_selected = set(sources or [])
+            # ---- COMPARE MODE — balanced hybrid retrieval ----
             retrieval = RetrievalService(session.name)
-            scored_docs = retrieval.retrieve(
-                query=question_text,
-                sources=sources or None,
-                k=10,
-                use_hybrid=True,
-                use_multi_query=False,   # skip multi-query for speed
-                use_reranking=True,
-            )
 
-            # Extract raw langchain docs for SynthesisService
-            docs = [sd.document for sd in scored_docs]
-
-            retrieved_chunks = [sd.to_citation_dict() for sd in scored_docs]
-            grounding_info["retrieved_chunks_count"] = len(scored_docs)
-            if scored_docs:
-                grounding_info["confidence_score"] = round(
-                    sum(d.score for d in scored_docs) / len(scored_docs), 4
+            # Force per-source retrieval to avoid source imbalance in comparison.
+            scored_docs = []
+            seen_chunk_ids = set()
+            for src in distinct_selected:
+                source_docs = retrieval.retrieve(
+                    query=question_text,
+                    sources=[src],
+                    k=5,
+                    use_hybrid=True,
+                    use_multi_query=False,   # skip multi-query for speed
+                    use_reranking=True,
                 )
+                for doc in source_docs:
+                    if doc.chunk_id in seen_chunk_ids:
+                        continue
+                    seen_chunk_ids.add(doc.chunk_id)
+                    scored_docs.append(doc)
 
-            result = synthesis_service.compare_papers(question_text, docs, sources)
+            # Keep top chunks by score after balancing
+            scored_docs.sort(key=lambda d: d.score, reverse=True)
+            scored_docs = scored_docs[:14]
 
-            Answer.objects.create(
-                question=question_obj,
-                text=f"Comparison on: {question_text}",
-                citations=retrieved_chunks,
-                metadata=result,
-            )
+            distinct_retrieved_sources = {
+                d.document.metadata.get("source") for d in scored_docs
+            }
+            distinct_retrieved_sources = {
+                s for s in distinct_retrieved_sources if s
+            }
+            if len(distinct_retrieved_sources) < 2:
+                result = {
+                    "topic": question_text,
+                    "claims": [],
+                    "message": (
+                        "I could not retrieve enough evidence from at least two "
+                        "different selected documents to produce a reliable comparison."
+                    ),
+                    "num_papers": len(distinct_retrieved_sources),
+                    "sources": list(distinct_retrieved_sources),
+                }
+                retrieved_chunks = [sd.to_citation_dict() for sd in scored_docs]
+                result["citations"] = retrieved_chunks
+
+                grounding_info["retrieved_chunks_count"] = len(scored_docs)
+                if scored_docs:
+                    grounding_info["confidence_score"] = round(
+                        sum(d.score for d in scored_docs) / len(scored_docs), 4
+                    )
+
+                Answer.objects.create(
+                    question=question_obj,
+                    text=result["message"],
+                    citations=retrieved_chunks,
+                    metadata=result,
+                )
+            else:
+                # Extract raw langchain docs for SynthesisService
+                docs = [sd.document for sd in scored_docs]
+
+                retrieved_chunks = [sd.to_citation_dict() for sd in scored_docs]
+                grounding_info["retrieved_chunks_count"] = len(scored_docs)
+                if scored_docs:
+                    grounding_info["confidence_score"] = round(
+                        sum(d.score for d in scored_docs) / len(scored_docs), 4
+                    )
+
+                result = synthesis_service.compare_papers(question_text, docs, sources)
+                result["citations"] = retrieved_chunks
+
+                Answer.objects.create(
+                    question=question_obj,
+                    text=f"Comparison on: {question_text}",
+                    citations=retrieved_chunks,
+                    metadata=result,
+                )
 
         elif mode == "lit_review":
             # ---- LIT REVIEW MODE — hybrid retrieval ----
@@ -240,7 +378,7 @@ def ask_question(request):
             Answer.objects.create(
                 question=question_obj,
                 text=result.get("content", ""),
-                citations=retrieved_chunks,
+                citations=[],
                 metadata={
                     "title": result.get("title"),
                     "mode": "lit_review",

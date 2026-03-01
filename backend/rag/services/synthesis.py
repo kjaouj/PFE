@@ -21,6 +21,41 @@ class SynthesisService:
         """
         self.llm = create_llm(model=model)
 
+    def _parse_compare_json(self, response: str) -> Optional[Dict[str, Any]]:
+        """
+        Parse and validate compare response JSON.
+        """
+        json_start = response.find("{")
+        json_end = response.rfind("}") + 1
+        if json_start < 0 or json_end <= json_start:
+            return None
+
+        candidate = response[json_start:json_end]
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            return None
+
+        claims = parsed.get("claims")
+        if claims is None:
+            return None
+        if not isinstance(claims, list):
+            return None
+
+        # Soft normalization of expected shape
+        normalized_claims = []
+        for claim in claims:
+            if not isinstance(claim, dict):
+                continue
+            normalized_claims.append(
+                {
+                    "claim": claim.get("claim", ""),
+                    "papers": claim.get("papers", []),
+                }
+            )
+        parsed["claims"] = normalized_claims
+        return parsed
+
     def compare_papers(
         self,
         question: str,
@@ -48,7 +83,11 @@ class SynthesisService:
         for source, source_docs in docs_by_source.items():
             source_context = f"\n\n--- Document: {source} ---\n"
             for doc in source_docs:
-                page = doc.metadata.get("page", "?")
+                raw_page = doc.metadata.get("page", "?")
+                if isinstance(raw_page, int):
+                    page = raw_page + 1
+                else:
+                    page = raw_page
                 source_context += f"\n[Page {page}]: {doc.page_content}\n"
             context_parts.append(source_context)
 
@@ -92,39 +131,38 @@ If only one paper is provided in the context, clearly state that in a "message" 
 
 Include 3-5 major claims. Focus on contrasting findings.
 
-THINKING PROCESS:
-(Before providing the JSON, analyze how each document addresses the claim)
-
 JSON OUTPUT:
 """
-
-
         response = self.llm.invoke(prompt)
+        parsed = self._parse_compare_json(response)
 
-        # Parse LLM response
-        try:
-            # Extract JSON from response (may have markdown wrappers)
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            if json_start >= 0 and json_end > json_start:
-                json_str = response[json_start:json_end]
-                parsed = json.loads(json_str)
+        # Retry once with stricter instruction if needed
+        if parsed is None:
+            repair_prompt = (
+                "Return ONLY valid JSON with this schema:\n"
+                '{"claims":[{"claim":"...","papers":[{"paper_id":"...","stance":"supports|contradicts|neutral","evidence":[{"page":1,"excerpt":"..."}]}]}],'
+                '"message":"optional"}\n\n'
+                f"Original output to fix:\n{response}"
+            )
+            repaired = self.llm.invoke(repair_prompt)
+            parsed = self._parse_compare_json(repaired)
 
-                return {
-                    "topic": question,
-                    "claims": parsed.get("claims", []),
-                    "num_papers": len(docs_by_source),
-                    "sources": list(docs_by_source.keys())
-                }
-            else:
-                raise ValueError("No JSON structure found in LLM response")
-        except (json.JSONDecodeError, ValueError) as e:
+        if parsed is None:
             return {
                 "topic": question,
-                "text": response, # Fallback to raw text
+                "claims": [],
+                "message": "Could not produce a structured comparison. Try narrowing the question.",
                 "num_papers": len(docs_by_source),
-                "sources": list(docs_by_source.keys())
+                "sources": list(docs_by_source.keys()),
             }
+
+        return {
+            "topic": question,
+            "claims": parsed.get("claims", []),
+            "message": parsed.get("message", ""),
+            "num_papers": len(docs_by_source),
+            "sources": list(docs_by_source.keys())
+        }
 
     def generate_literature_review(
         self,
@@ -142,7 +180,7 @@ JSON OUTPUT:
             }
 
         context = "\n\n".join([
-            f"Source: {d.metadata.get('source', 'unknown')} (Page {d.metadata.get('page', '?')})\n{d.page_content}"
+            f"Source: {d.metadata.get('source', 'unknown')} (Page {(d.metadata.get('page', '?') + 1) if isinstance(d.metadata.get('page', '?'), int) else d.metadata.get('page', '?')})\n{d.page_content}"
             for d in docs
         ])
 
@@ -158,9 +196,6 @@ Based on the retrieved snippets below, synthesize a review with the following se
 Use formal academic tone. 
 Retrieved Snippets:
 {context}
-
-THINKING PROCESS:
-(Identify the core themes and findings from the snippets before writing)
 
 LITERATURE REVIEW:
 """
