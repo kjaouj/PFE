@@ -15,6 +15,12 @@ function App() {
   const [mode, setMode] = useState("qa");
   const [loading, setLoading] = useState(false);
   const [theme, setTheme] = useState(localStorage.getItem("theme") || "dark");
+  const [pdfViewer, setPdfViewer] = useState(null);
+  const [highlights, setHighlights] = useState([]);
+  const [highlightNote, setHighlightNote] = useState("");
+  const [highlightTags, setHighlightTags] = useState("");
+  const [highlightSearch, setHighlightSearch] = useState("");
+  const [highlightSearchResults, setHighlightSearchResults] = useState([]);
   const fileInputRef = useRef(null);
   const chatEndRef = useRef(null);
 
@@ -48,6 +54,12 @@ function App() {
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  useEffect(() => {
+    if (pdfViewer?.filename) {
+      loadHighlightsForDocument(pdfViewer.filename);
+    }
+  }, [pdfViewer?.filename, pdfs]);
 
   const loadSessions = async () => {
     try {
@@ -98,6 +110,154 @@ function App() {
       }
     } catch (err) {
       console.error("Failed to load metrics", err);
+    }
+  };
+
+  const normalizeForMatch = (text = "") =>
+    text
+      .toLowerCase()
+      .replace(/[^\w\s]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const choosePrecisePhrase = (snippet, pageText) => {
+    const cleanSnippet = (snippet || "").replace(/\s+/g, " ").trim();
+    const cleanPage = normalizeForMatch(pageText || "");
+    if (!cleanSnippet || !cleanPage) return "";
+
+    const words = cleanSnippet.split(" ").filter(Boolean);
+    if (words.length < 4) return "";
+
+    const windowSizes = [16, 14, 12, 10, 8, 6];
+    for (const size of windowSizes) {
+      if (words.length < size) continue;
+      for (let i = 0; i <= words.length - size; i++) {
+        const phrase = words.slice(i, i + size).join(" ").trim();
+        const phraseNorm = normalizeForMatch(phrase);
+        if (phraseNorm.length < 24) continue;
+        if (cleanPage.includes(phraseNorm)) {
+          return phrase;
+        }
+      }
+    }
+
+    return "";
+  };
+
+  const openCitationViewer = async (citation) => {
+    const filename = citation.source;
+    const page = citation.pageOneIndexed
+      ? Number(citation.page || 1)
+      : Number(citation.page || 0) + 1;
+    const snippet = (citation.snippet || "").trim();
+    const docUrl = `http://127.0.0.1:8000/media/pdfs/${encodeURIComponent(filename)}`;
+
+    let precisePhrase = "";
+    const doc = pdfs.find((p) => p.filename === filename);
+    if (doc) {
+      try {
+        const res = await fetch(
+          `http://127.0.0.1:8000/api/documents/${doc.id}/page-text/?page=${page}`
+        );
+        if (res.ok) {
+          const payload = await res.json();
+          precisePhrase = choosePrecisePhrase(snippet, payload.text || "");
+        }
+      } catch (err) {
+        console.error("Failed fetching page text for precise highlight", err);
+      }
+    }
+
+    const exactSearch = precisePhrase ? `"${precisePhrase}"` : "";
+    const viewerUrl = `https://mozilla.github.io/pdf.js/web/viewer.html?file=${encodeURIComponent(docUrl)}#page=${page}${exactSearch ? `&search=${encodeURIComponent(exactSearch)}&phrase=true` : ""}`;
+
+    setPdfViewer({
+      filename,
+      page,
+      snippet,
+      viewerUrl,
+      precisePhrase,
+    });
+  };
+
+  const loadHighlightsForDocument = async (filename) => {
+    const doc = pdfs.find((p) => p.filename === filename);
+    if (!doc) return setHighlights([]);
+
+    try {
+      const res = await fetch(`http://127.0.0.1:8000/api/highlights/?document_id=${doc.id}`);
+      const data = await res.json();
+      if (res.ok) setHighlights(data.highlights || []);
+    } catch (err) {
+      console.error("Failed to load highlights", err);
+    }
+  };
+
+  const createHighlightFromCitation = async () => {
+    if (!pdfViewer?.filename || !pdfViewer?.snippet) return;
+    const doc = pdfs.find((p) => p.filename === pdfViewer.filename);
+    if (!doc) return;
+
+    const tags = highlightTags
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
+
+    try {
+      const res = await fetch("http://127.0.0.1:8000/api/highlights/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          document_id: doc.id,
+          page: pdfViewer.page,
+          start_offset: 0,
+          end_offset: pdfViewer.snippet.length,
+          text: pdfViewer.snippet,
+          note: highlightNote,
+          tags,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setHighlightNote("");
+        setHighlightTags("");
+        await loadHighlightsForDocument(pdfViewer.filename);
+        setStatus("Highlight saved");
+      } else {
+        setStatus(data.error || "Failed to save highlight");
+      }
+    } catch (err) {
+      setStatus("Failed to save highlight");
+    }
+  };
+
+  const deleteHighlight = async (highlightId) => {
+    try {
+      const res = await fetch(`http://127.0.0.1:8000/api/highlights/${highlightId}/`, {
+        method: "DELETE",
+      });
+      if (res.ok && pdfViewer?.filename) {
+        await loadHighlightsForDocument(pdfViewer.filename);
+      }
+    } catch (err) {
+      console.error("Failed to delete highlight", err);
+    }
+  };
+
+  const searchMyHighlights = async (e) => {
+    e?.preventDefault();
+    if (!highlightSearch.trim() || !session) return;
+
+    try {
+      const res = await fetch(
+        `http://127.0.0.1:8000/api/highlights/search/?session=${encodeURIComponent(session)}&q=${encodeURIComponent(highlightSearch)}`
+      );
+      const data = await res.json();
+      if (res.ok) {
+        setHighlightSearchResults(data.results || []);
+      }
+    } catch (err) {
+      console.error("Highlight search failed", err);
     }
   };
 
@@ -546,6 +706,41 @@ function App() {
         </div>
         {status && <div className="status-indicator">{status}</div>}
 
+        {mode !== "monitoring" && (
+          <div className="global-highlight-search">
+            <form className="input-group" onSubmit={searchMyHighlights}>
+              <input
+                type="text"
+                value={highlightSearch}
+                onChange={(e) => setHighlightSearch(e.target.value)}
+                placeholder='Search in my highlights (e.g. "supporting evidence for claim X")'
+              />
+              <button className="btn-icon" type="submit">Go</button>
+            </form>
+            {highlightSearchResults.length > 0 && (
+              <div className="global-highlight-results">
+                {highlightSearchResults.slice(0, 5).map((hl) => (
+                  <button
+                    key={`global-${hl.id}-${hl.score}`}
+                    className="highlight-search-hit"
+                    onClick={() =>
+                      openCitationViewer({
+                        source: hl.filename,
+                        page: hl.page || 1,
+                        snippet: hl.text,
+                        pageOneIndexed: true,
+                      })
+                    }
+                  >
+                    <strong>{hl.filename}</strong> p.{hl.page} ({(hl.score || 0).toFixed(3)})
+                    <p>{hl.text}</p>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="chat-container">
           {mode === 'monitoring' ? (
             <div className="monitoring-dashboard">
@@ -576,6 +771,28 @@ function App() {
                       ))}
                     </ul>
                   </div>
+                  {metrics.grounding && (
+                    <>
+                      <div className="metric-card">
+                        <h3>Refusal Rate</h3>
+                        <p className="metric-value">{(metrics.grounding.refusal_rate * 100).toFixed(1)}%</p>
+                        <p className="metric-sub">{metrics.grounding.refusal_count} refusals</p>
+                      </div>
+                      <div className="metric-card">
+                        <h3>Low Evidence Rate</h3>
+                        <p className="metric-value">{(metrics.grounding.insufficient_evidence_rate * 100).toFixed(1)}%</p>
+                        <p className="metric-sub">{metrics.grounding.insufficient_evidence_count} flagged</p>
+                      </div>
+                      <div className="metric-card">
+                        <h3>Avg Chunks Retrieved</h3>
+                        <p className="metric-value">{metrics.grounding.avg_retrieved_chunks}</p>
+                      </div>
+                      <div className="metric-card">
+                        <h3>Avg Confidence</h3>
+                        <p className="metric-value">{(metrics.grounding.avg_confidence_score || 0).toFixed(3)}</p>
+                      </div>
+                    </>
+                  )}
                 </div>
               ) : <p>Loading metrics...</p>}
             </div>
@@ -617,9 +834,14 @@ function App() {
                   {msg.citations && msg.citations.length > 0 && (
                     <div className="citations-grid">
                       {msg.citations.map((c, j) => (
-                        <div key={j} className="citation-chip">
-                          📖 {c.source} (p.{c.page})
-                        </div>
+                        <button
+                          key={j}
+                          className="citation-chip clickable"
+                          onClick={() => openCitationViewer(c)}
+                          title={c.snippet || "Open citation in PDF viewer"}
+                        >
+                          View {c.source} (p.{Number(c.page || 0) + 1})
+                        </button>
                       ))}
                     </div>
                   )}
@@ -629,6 +851,110 @@ function App() {
           )}
           <div ref={chatEndRef} />
         </div>
+
+        {pdfViewer && (
+          <div className="pdf-drawer">
+            <div className="pdf-drawer-header">
+              <div>
+                <strong>{pdfViewer.filename}</strong>
+                <p>Page {pdfViewer.page}</p>
+              </div>
+              <button
+                className="text-btn"
+                onClick={() => setPdfViewer(null)}
+              >
+                Close
+              </button>
+            </div>
+
+            <iframe
+              title="PDF.js Viewer"
+              className="pdf-frame"
+              src={pdfViewer.viewerUrl}
+            />
+
+            <div className="drawer-section">
+              <h4>Citation Snippet</h4>
+              <p className="snippet-box">{pdfViewer.snippet || "No snippet provided."}</p>
+              {pdfViewer.precisePhrase && (
+                <p className="muted" style={{ marginTop: "6px" }}>
+                  Precise page phrase: "{pdfViewer.precisePhrase}"
+                </p>
+              )}
+            </div>
+
+            <div className="drawer-section">
+              <h4>Create Highlight</h4>
+              <input
+                type="text"
+                value={highlightNote}
+                onChange={(e) => setHighlightNote(e.target.value)}
+                placeholder="Optional note..."
+              />
+              <input
+                type="text"
+                value={highlightTags}
+                onChange={(e) => setHighlightTags(e.target.value)}
+                placeholder="Tags (comma-separated)"
+              />
+              <button className="btn-primary" onClick={createHighlightFromCitation}>
+                Save Highlight
+              </button>
+            </div>
+
+            <div className="drawer-section">
+              <h4>Highlights In This Document</h4>
+              <div className="highlight-list">
+                {highlights.map((hl) => (
+                  <div key={hl.id} className="highlight-item">
+                    <div className="highlight-row">
+                      <span>p.{hl.page}</span>
+                      <button className="text-btn" onClick={() => deleteHighlight(hl.id)}>
+                        Delete
+                      </button>
+                    </div>
+                    <p>{hl.text}</p>
+                    {hl.note && <p className="muted">Note: {hl.note}</p>}
+                  </div>
+                ))}
+                {highlights.length === 0 && <p className="muted">No highlights yet.</p>}
+              </div>
+            </div>
+
+            <div className="drawer-section">
+              <h4>Search In My Highlights (Session)</h4>
+              <form className="input-group" onSubmit={searchMyHighlights}>
+                <input
+                  type="text"
+                  value={highlightSearch}
+                  onChange={(e) => setHighlightSearch(e.target.value)}
+                  placeholder='e.g. supporting evidence for "claim X"'
+                />
+                <button className="btn-icon" type="submit">Go</button>
+              </form>
+              <div className="highlight-list">
+                {highlightSearchResults.map((hl) => (
+                  <button
+                    key={`${hl.id}-${hl.score}`}
+                    className="highlight-search-hit"
+                    onClick={() =>
+                      openCitationViewer({
+                        source: hl.filename,
+                        page: hl.page || 1,
+                        snippet: hl.text,
+                        pageOneIndexed: true,
+                      })
+                    }
+                  >
+                    <strong>{hl.filename}</strong> p.{hl.page} ({(hl.score || 0).toFixed(3)})
+                    <p>{hl.text}</p>
+                  </button>
+                ))}
+                {highlightSearchResults.length === 0 && <p className="muted">No search results yet.</p>}
+              </div>
+            </div>
+          </div>
+        )}
 
         {mode !== 'monitoring' && (
           <div className="input-area">
@@ -656,3 +982,4 @@ function App() {
 }
 
 export default App;
+

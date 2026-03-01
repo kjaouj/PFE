@@ -1,6 +1,9 @@
 import time
+import logging
 import threading
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
@@ -18,6 +21,7 @@ from .ingest import ingest_pdf
 from .services.ingestion import IngestionService
 from .services.metrics import MetricsService
 from .services.synthesis import SynthesisService
+from .services.retrieval import RetrievalService
 
 from .router import is_title_question, is_about_paper_question, is_page_count_question
 
@@ -56,6 +60,64 @@ def document_status(request, document_id):
         return Response(
             {"error": "Document not found"},
             status=status.HTTP_404_NOT_FOUND
+        )
+
+
+@api_view(["GET"])
+def document_page_text(request, document_id):
+    """
+    Return extracted text for a specific PDF page.
+    Query param:
+      - page (1-indexed)
+    """
+    try:
+        document = Document.objects.get(id=document_id)
+    except Document.DoesNotExist:
+        return Response(
+            {"error": "Document not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    try:
+        page = int(request.GET.get("page", "1"))
+    except ValueError:
+        return Response(
+            {"error": "Invalid page parameter"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if page < 1:
+        return Response(
+            {"error": "Page must be >= 1"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        from pypdf import PdfReader
+
+        file_path = default_storage.path(f"pdfs/{document.filename}")
+        reader = PdfReader(file_path)
+
+        if page > len(reader.pages):
+            return Response(
+                {"error": "Page out of range"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        text = (reader.pages[page - 1].extract_text() or "").strip()
+        return Response(
+            {
+                "document_id": document.id,
+                "filename": document.filename,
+                "page": page,
+                "text": text,
+            },
+            status=status.HTTP_200_OK,
+        )
+    except Exception as exc:
+        return Response(
+            {"error": str(exc)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 @api_view(["GET"])
@@ -111,103 +173,170 @@ def ask_question(request):
     metrics_service = MetricsService()
     synthesis_service = SynthesisService()
     retrieved_chunks = []
+    grounding_info = {
+        "is_refusal": False,
+        "is_insufficient_evidence": False,
+        "retrieved_chunks_count": 0,
+        "confidence_score": None,
+    }
 
     try:
         if mode == "compare":
-            # Comparison mode logic
-            from langchain_chroma import Chroma
-            from langchain_ollama import OllamaEmbeddings
-            from .utils import get_session_path
-            
-            persist_dir = get_session_path(session.name)
-            embeddings = OllamaEmbeddings(model="nomic-embed-text")
-            vectordb = Chroma(persist_directory=persist_dir, embedding_function=embeddings)
-            
-            if sources and len(sources) > 1:
-                # Per-source retrieval to ensure multidocument awareness
-                all_docs = []
-                for src in sources:
-                    sdocs = vectordb.similarity_search(question_text, k=4, filter={"source": src})
-                    all_docs.extend(sdocs)
-                docs = all_docs
-            else:
-                docs = vectordb.similarity_search(question_text, k=10, filter={"source": {"$in": sources}} if sources else None)
-            
-            retrieved_chunks = [
-                {"doc": d.metadata.get("source"), "page": d.metadata.get("page"), "score": 0.0}
-                for d in docs
-            ]
-            
+            # ---- COMPARE MODE — hybrid retrieval ----
+            retrieval = RetrievalService(session.name)
+            scored_docs = retrieval.retrieve(
+                query=question_text,
+                sources=sources or None,
+                k=10,
+                use_hybrid=True,
+                use_multi_query=False,   # skip multi-query for speed
+                use_reranking=True,
+            )
+
+            # Extract raw langchain docs for SynthesisService
+            docs = [sd.document for sd in scored_docs]
+
+            retrieved_chunks = [sd.to_citation_dict() for sd in scored_docs]
+            grounding_info["retrieved_chunks_count"] = len(scored_docs)
+            if scored_docs:
+                grounding_info["confidence_score"] = round(
+                    sum(d.score for d in scored_docs) / len(scored_docs), 4
+                )
+
             result = synthesis_service.compare_papers(question_text, docs, sources)
-            
+
             Answer.objects.create(
                 question=question_obj,
                 text=f"Comparison on: {question_text}",
-                citations=[],
-                metadata=result
+                citations=retrieved_chunks,
+                metadata=result,
             )
 
         elif mode == "lit_review":
-            from langchain_chroma import Chroma
-            from langchain_ollama import OllamaEmbeddings
-            from .utils import get_session_path
-            
-            persist_dir = get_session_path(session.name)
-            embeddings = OllamaEmbeddings(model="nomic-embed-text")
-            vectordb = Chroma(persist_directory=persist_dir, embedding_function=embeddings)
-            
-            if sources and len(sources) > 1:
-                all_docs = []
-                for src in sources:
-                    sdocs = vectordb.similarity_search(question_text, k=5, filter={"source": src})
-                    all_docs.extend(sdocs)
-                docs = all_docs
-            else:
-                docs = vectordb.similarity_search(question_text, k=15, filter={"source": {"$in": sources}} if sources else None)
-            
-            retrieved_chunks = [
-                {"doc": d.metadata.get("source"), "page": d.metadata.get("page"), "score": 0.0}
-                for d in docs
-            ]
-            
-            result = synthesis_service.generate_literature_review(question_text, docs, sources)
-            
+            # ---- LIT REVIEW MODE — hybrid retrieval ----
+            retrieval = RetrievalService(session.name)
+            scored_docs = retrieval.retrieve(
+                query=question_text,
+                sources=sources or None,
+                k=15,
+                use_hybrid=True,
+                use_multi_query=False,
+                use_reranking=True,
+            )
+
+            docs = [sd.document for sd in scored_docs]
+
+            retrieved_chunks = [sd.to_citation_dict() for sd in scored_docs]
+            grounding_info["retrieved_chunks_count"] = len(scored_docs)
+            if scored_docs:
+                grounding_info["confidence_score"] = round(
+                    sum(d.score for d in scored_docs) / len(scored_docs), 4
+                )
+
+            result = synthesis_service.generate_literature_review(
+                question_text, docs, sources
+            )
+
             Answer.objects.create(
                 question=question_obj,
                 text=result.get("content", ""),
-                citations=[],
+                citations=retrieved_chunks,
                 metadata={
                     "title": result.get("title"),
-                    "mode": "lit_review"
-                }
+                    "mode": "lit_review",
+                },
             )
 
         else:
-            # Existing QA Logic
-            if is_title_question(question_text) and sources:
-                doc = Document.objects.get(session=session, filename=sources[0])
-                result = {"answer": doc.title or "Title not available.", "citations": []}
-            elif is_page_count_question(question_text) and sources:
-                doc = Document.objects.get(session=session, filename=sources[0])
-                result = {"answer": f"The document '{doc.filename}' has {doc.page_count or 'unknown'} pages.", "citations": []}
-            elif is_about_paper_question(question_text) and sources:
-                docs = retrieve_paper_overview(question=question_text, session_name=session.name, source=sources[0])
-                result = ask_with_citations(question=question_text, session_name=session.name, docs_override=docs)
-            else:
-                result = ask_with_citations(question=question_text, session_name=session.name, sources=sources or None)
+            # ---- QA MODE ----
+            result = None
+
+            # 1. SPECIALIZED AGENTS (Title, Page Count, Overview)
+            if sources:
+                try:
+                    if is_title_question(question_text):
+                        doc = Document.objects.get(
+                            session=session, filename=sources[0]
+                        )
+                        result = {
+                            "answer": doc.title or "Title not available.",
+                            "citations": [],
+                            "is_refusal": False,
+                            "is_insufficient_evidence": False,
+                            "retrieved_chunks_count": 0,
+                            "confidence_score": 1.0,
+                        }
+                    elif is_page_count_question(question_text):
+                        doc = Document.objects.get(
+                            session=session, filename=sources[0]
+                        )
+                        result = {
+                            "answer": (
+                                f"The document '{doc.filename}' has "
+                                f"{doc.page_count or 'unknown'} pages."
+                            ),
+                            "citations": [],
+                            "is_refusal": False,
+                            "is_insufficient_evidence": False,
+                            "retrieved_chunks_count": 0,
+                            "confidence_score": 1.0,
+                        }
+                    elif is_about_paper_question(question_text):
+                        docs = retrieve_paper_overview(
+                            question=question_text,
+                            session_name=session.name,
+                            source=sources[0],
+                        )
+                        result = ask_with_citations(
+                            question=question_text,
+                            session_name=session.name,
+                            docs_override=docs,
+                        )
+                except Document.DoesNotExist:
+                    logger.warning(
+                        f"Specialized route failed: Document '{sources[0]}' "
+                        f"not found in session '{session.name}'. "
+                        f"Falling back to RAG."
+                    )
+
+            # 2. DEFAULT RAG (Fallback or generic question)
+            if not result:
+                result = ask_with_citations(
+                    question=question_text,
+                    session_name=session.name,
+                    sources=sources or None,
+                )
+
+            # Persist grounding info from the result
+            grounding_info["is_refusal"] = result.get("is_refusal", False)
+            grounding_info["is_insufficient_evidence"] = result.get(
+                "is_insufficient_evidence", False
+            )
+            grounding_info["retrieved_chunks_count"] = result.get(
+                "retrieved_chunks_count", 0
+            )
+            grounding_info["confidence_score"] = result.get(
+                "confidence_score"
+            )
 
             Answer.objects.create(
                 question=question_obj,
                 text=result["answer"],
-                citations=result["citations"]
+                citations=result["citations"],
             )
-            
+
             retrieved_chunks = [
-                {"doc": c["source"], "page": c["page"], "score": 0.0}
+                {
+                    "doc": c.get("source"),
+                    "page": c.get("page"),
+                    "chunk_id": c.get("chunk_id", ""),
+                    "snippet": c.get("snippet", ""),
+                    "score": c.get("score", 0.0),
+                }
                 for c in result.get("citations", [])
             ]
 
-        # Log metrics
+        # Log metrics (with grounding data)
         latency_ms = int((time.time() - start_time) * 1000)
         metrics_service.log_query(
             session=session,
@@ -216,7 +345,11 @@ def ask_question(request):
             mode=mode,
             sources=sources,
             latency_ms=latency_ms,
-            retrieved_chunks=retrieved_chunks
+            retrieved_chunks=retrieved_chunks,
+            is_refusal=grounding_info["is_refusal"],
+            is_insufficient_evidence=grounding_info["is_insufficient_evidence"],
+            retrieved_chunks_count=grounding_info["retrieved_chunks_count"],
+            confidence_score=grounding_info["confidence_score"],
         )
 
         return Response(result, status=status.HTTP_200_OK)
@@ -231,9 +364,11 @@ def ask_question(request):
             sources=sources,
             latency_ms=latency_ms,
             retrieved_chunks=retrieved_chunks,
-            error=e
+            error=e,
         )
-        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response(
+            {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 
 
 
@@ -434,11 +569,11 @@ def delete_pdf(request):
 
     # 1. Delete from Chroma
     from langchain_chroma import Chroma
-    from langchain_ollama import OllamaEmbeddings
+    from .services.ollama_client import create_embeddings
     from .utils import get_session_path
 
     persist_dir = get_session_path(session_name)
-    embeddings = OllamaEmbeddings(model="nomic-embed-text")
+    embeddings = create_embeddings(model="nomic-embed-text")
     vectordb = Chroma(
         persist_directory=persist_dir,
         embedding_function=embeddings

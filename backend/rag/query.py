@@ -1,66 +1,140 @@
+"""
+RAG Query Module
+
+Handles question-answering with:
+  - Advanced hybrid retrieval (via RetrievalService)
+  - Snippet-level citations (source, page, chunk_id, snippet, score)
+  - Refusal / insufficient-evidence classification
+"""
+
+import logging
+from typing import List, Dict, Optional, Any
+
 from langchain_chroma import Chroma
-from langchain_ollama import OllamaLLM, OllamaEmbeddings
 
 from rag.utils import get_session_path
+from rag.services.retrieval import RetrievalService, ScoredDocument
+from rag.services.ollama_client import create_embeddings, create_llm
 
-from collections import Counter
+logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+#  Response Classification
+# ---------------------------------------------------------------------------
+
+REFUSAL_PHRASES = [
+    "i cannot find",
+    "no relevant sections",
+    "i don't have enough information",
+    "the provided context does not",
+    "there is no information",
+    "i cannot answer",
+    "not mentioned in the",
+    "no information available",
+]
+
+INSUFFICIENT_EVIDENCE_PHRASES = [
+    "insufficient evidence",
+    "limited information",
+    "the context does not provide enough",
+    "partially addressed",
+    "not enough detail",
+    "the documents do not fully",
+]
+
+
+def classify_response(answer_text: str) -> Dict[str, bool]:
+    """Detect whether an answer is a refusal or flags insufficient evidence."""
+    lower_text = answer_text.lower()
+    return {
+        "is_refusal": any(p in lower_text for p in REFUSAL_PHRASES),
+        "is_insufficient_evidence": any(
+            p in lower_text for p in INSUFFICIENT_EVIDENCE_PHRASES
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+#  Citation helpers
+# ---------------------------------------------------------------------------
+
+def build_snippet_citations(
+    scored_docs: List[ScoredDocument],
+) -> List[Dict[str, Any]]:
+    """Build de-duplicated, snippet-level citations from scored documents."""
+    citations: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    for doc in scored_docs:
+        key = doc.chunk_id
+        if key in seen:
+            continue
+        seen.add(key)
+        citations.append(doc.to_citation_dict())
+
+    return citations
+
+
+# ---------------------------------------------------------------------------
+#  Main QA function
+# ---------------------------------------------------------------------------
 
 def ask_with_citations(
     question: str,
     session_name: str,
-    sources=None,
+    sources: Optional[List[str]] = None,
     docs_override=None,
-    k: int = 8,  # Increased k for more context
-):
-    persist_dir = get_session_path(session_name)
-    embeddings = OllamaEmbeddings(model="nomic-embed-text")
+    k: int = 8,
+) -> Dict[str, Any]:
+    """
+    Answer a question with advanced hybrid retrieval and snippet-level
+    citations.  Returns a dict with keys:
+        answer, citations, is_refusal, is_insufficient_evidence,
+        retrieved_chunks_count, confidence_score
+    """
 
-    vectordb = Chroma(
-        persist_directory=persist_dir,
-        embedding_function=embeddings
-    )
-
-    # USE OVERRIDE IF PROVIDED
+    # ---- 1. Retrieve ----
     if docs_override is not None:
-        docs = docs_override
-
+        # Specialised routes pass raw LangChain documents directly
+        scored_docs = [ScoredDocument(d, score=1.0) for d in docs_override]
     else:
-        # Improved retrieval: if multiple sources, get a balanced set
-        if sources and len(sources) > 1:
-            all_docs = []
-            per_source_k = max(2, k // len(sources))
-            for src in sources:
-                sdocs = vectordb.similarity_search(question, k=per_source_k, filter={"source": src})
-                all_docs.extend(sdocs)
-            docs = all_docs
-        elif sources:
-            docs = vectordb.similarity_search(
-                question,
-                k=k,
-                filter={"source": {"$in": sources}}
-            )
-        else:
-            docs = vectordb.similarity_search(question, k=k)
+        retrieval = RetrievalService(session_name)
+        scored_docs = retrieval.retrieve(
+            query=question,
+            sources=sources,
+            k=k,
+            use_hybrid=True,
+            use_multi_query=True,
+            use_reranking=True,
+        )
 
-
-    if not docs:
+    if not scored_docs:
+        answer_text = (
+            "I cannot find any relevant sections in the selected "
+            "documents to answer this question."
+        )
+        classification = classify_response(answer_text)
         return {
-            "answer": "I cannot find any relevant sections in the selected documents to answer this question.",
-            "citations": []
+            "answer": answer_text,
+            "citations": [],
+            **classification,
+            "retrieved_chunks_count": 0,
+            "confidence_score": 0.0,
         }
 
-    # Normalize docs → text with source info
+    # ---- 2. Build context ----
     context_parts = []
-    for d in docs:
+    for d in scored_docs:
         source = d.metadata.get("source", "unknown")
         page = d.metadata.get("page", "?")
-        content = d.page_content if hasattr(d, "page_content") else d
-        context_parts.append(f"--- SOURCE: {source}, PAGE: {page} ---\n{content}")
-    
+        context_parts.append(
+            f"--- SOURCE: {source}, PAGE: {page} ---\n{d.page_content}"
+        )
     context = "\n\n".join(context_parts)
 
-    llm = OllamaLLM(model="mistral")
+    # ---- 3. Generate answer ----
+    llm = create_llm(model="mistral")
 
     prompt = f"""You are a precise scientific research assistant.
 
@@ -84,33 +158,33 @@ ANSWER:
 """
 
     response = llm.invoke(prompt)
-    
-    # Split to remove the thinking process from the final output if the model includes it
+
+    # Strip the thinking section
     if "ANSWER:" in response:
         final_answer = response.split("ANSWER:")[-1].strip()
     else:
         final_answer = response.strip()
 
-    page_counts = Counter(
-        (d.metadata.get("source"), d.metadata.get("page"))
-        for d in docs
-    )
+    # ---- 4. Snippet-level citations ----
+    citations = build_snippet_citations(scored_docs)
 
-    citations = [
-        {
-            "source": source,
-            "page": page,
-            "count": count
-        }
-        for (source, page), count in page_counts.items()
-    ]
+    # ---- 5. Classify the answer ----
+    classification = classify_response(final_answer)
+
+    avg_score = sum(d.score for d in scored_docs) / len(scored_docs)
 
     return {
         "answer": final_answer,
-        "citations": citations
+        "citations": citations,
+        **classification,
+        "retrieved_chunks_count": len(scored_docs),
+        "confidence_score": round(avg_score, 4),
     }
 
 
+# ---------------------------------------------------------------------------
+#  Paper overview helper  (used by the specialised "about this paper" route)
+# ---------------------------------------------------------------------------
 
 def retrieve_paper_overview(
     question: str,
@@ -120,19 +194,18 @@ def retrieve_paper_overview(
 ):
     """
     Retrieve a structured overview of a paper:
-    - Always include abstract
-    - Add top-k body chunks for reasoning
+      - Always include abstract chunks
+      - Add top-k body chunks for reasoning
     """
-
     persist_dir = get_session_path(session_name)
-    embeddings = OllamaEmbeddings(model="nomic-embed-text")
+    embeddings = create_embeddings(model="nomic-embed-text")
 
     vectordb = Chroma(
         persist_directory=persist_dir,
         embedding_function=embeddings,
     )
 
-    # ✅ 1. Retrieve ABSTRACT chunks (correct Chroma filter)
+    # 1. Retrieve ABSTRACT chunks
     abstract_docs = vectordb.similarity_search(
         "abstract",
         k=5,
@@ -141,10 +214,10 @@ def retrieve_paper_overview(
                 {"source": {"$eq": source}},
                 {"section": {"$eq": "abstract"}},
             ]
-        }
+        },
     )
 
-    # ✅ 2. Retrieve BODY chunks (semantic)
+    # 2. Retrieve BODY chunks (semantic)
     body_docs = vectordb.similarity_search(
         question,
         k=k_body,
@@ -153,12 +226,7 @@ def retrieve_paper_overview(
                 {"source": {"$eq": source}},
                 {"section": {"$eq": "body"}},
             ]
-        }
+        },
     )
 
-    # ✅ 3. Combine
-    docs = []
-    docs.extend(abstract_docs)
-    docs.extend(body_docs)
-
-    return docs
+    return abstract_docs + body_docs

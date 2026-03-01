@@ -283,6 +283,25 @@ class RunLog(models.Model):
         help_text="Full error message/traceback"
     )
 
+    # Grounding / refusal tracking
+    is_refusal = models.BooleanField(
+        default=False,
+        help_text="Whether the LLM response was a refusal (no relevant info found)"
+    )
+    is_insufficient_evidence = models.BooleanField(
+        default=False,
+        help_text="Whether the LLM flagged insufficient evidence"
+    )
+    retrieved_chunks_count = models.IntegerField(
+        default=0,
+        help_text="Number of chunks retrieved for this query"
+    )
+    confidence_score = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Average retrieval confidence score (0-1)"
+    )
+
     # Metadata
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -291,4 +310,6 @@ class RunLog(models.Model):
         indexes = [
             models.Index(fields=['session', 'created_at']),
             models.Index(fields=['mode']),
+            models.Index(fields=['is_refusal']),
         ]
+

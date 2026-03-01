@@ -10,12 +10,12 @@ from typing import Optional
 from django.utils import timezone
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_ollama import OllamaEmbeddings
 from langchain_chroma import Chroma
 
 from rag.models import Document
 from rag.utils import get_session_path
 from rag.metadata import extract_title_and_abstract
+from rag.services.ollama_client import create_embeddings
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ class IngestionService:
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.embedding_model = embedding_model
-        self.embeddings = OllamaEmbeddings(model=embedding_model)
+        self.embeddings = create_embeddings(model=embedding_model)
 
     def ingest_document(self, document_id: int, pdf_path: str) -> dict:
         """
@@ -133,7 +133,7 @@ class IngestionService:
         Ingest a virtual document containing only metadata and abstract.
         Used when the full PDF is not publicly available.
         """
-        from langchain.schema import Document as LangchainDocument
+        from langchain_core.documents import Document as LangchainDocument
         try:
             document = Document.objects.get(id=document_id)
             document.status = 'PROCESSING'

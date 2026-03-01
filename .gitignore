@@ -9,8 +9,12 @@ __pycache__/
 
 # ===== Virtual environment =====
 venv/
-.env/
-.env.local
+
+# ===== Environment secrets =====
+.env
+backend/.env
+!.env.example
+!backend/.env.example
 
 # ===== Django =====
 db.sqlite3

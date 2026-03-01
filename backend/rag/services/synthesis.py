@@ -8,8 +8,8 @@ This service provides cross-document analysis capabilities:
 
 import json
 from typing import List, Dict, Any, Optional
-from langchain_ollama import OllamaLLM
 from collections import defaultdict
+from rag.services.ollama_client import create_llm
 
 
 class SynthesisService:
@@ -19,7 +19,7 @@ class SynthesisService:
         """
         Initialize synthesis service.
         """
-        self.llm = OllamaLLM(model=model)
+        self.llm = create_llm(model=model)
 
     def compare_papers(
         self,

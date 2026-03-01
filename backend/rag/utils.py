@@ -1,5 +1,8 @@
 from .models import Session
 
+from pathlib import Path
+from django.conf import settings
+
 
 def get_default_session():
     session, _ = Session.objects.get_or_create(
@@ -8,10 +11,9 @@ def get_default_session():
     return session
 
 
-from pathlib import Path
-
-# Base directory where all Chroma DBs are stored
-BASE_CHROMA_DIR = Path("data/chroma")
+# Base directory for all Chroma vector stores.
+# Reads from the CHROMA_PERSIST_DIR setting which itself comes from .env.
+BASE_CHROMA_DIR = Path(getattr(settings, "CHROMA_PERSIST_DIR", "data/chroma"))
 
 
 def get_session_path(session_name: str) -> str:
