@@ -1,7 +1,12 @@
 import logging
 import requests
-import time
 from typing import List, Dict, Optional
+
+from rag.services.resilience import (
+    call_with_resilience,
+    CircuitOpenError,
+    TransientExternalError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -11,31 +16,27 @@ class SemanticScholarService:
     BASE_URL = "https://api.semanticscholar.org/graph/v1"
 
     def _safe_request(self, url: str, params: Dict) -> Dict:
-        """Helper to handle rate limits with exponential backoff retries."""
-        for attempt in range(max_attempts := 5):
-            try:
-                response = requests.get(url, params=params, timeout=20)
-                
-                if response.status_code == 429:
-                    # Exponential backoff: 5, 10, 20, 40...
-                    wait = (2 ** attempt) * 5
-                    logger.warning(f"Semantic Scholar Rate Limit (429). Attempt {attempt+1}/{max_attempts}. Waiting {wait}s...")
-                    time.sleep(wait)
-                    continue
-                
-                if response.status_code != 200:
-                    logger.error(f"Semantic Scholar API Error {response.status_code}: {response.text}")
-                
-                response.raise_for_status()
-                return response.json()
-            
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Request attempt {attempt+1} failed: {e}")
-                if attempt == max_attempts - 1:
-                    raise
-                time.sleep(2)
-        
-        return {}
+        """Semantic Scholar request with retry and circuit breaker."""
+
+        def _request() -> Dict:
+            response = requests.get(url, params=params, timeout=20)
+            if response.status_code == 429:
+                raise TransientExternalError("Semantic Scholar rate limited (429)")
+            response.raise_for_status()
+            return response.json()
+
+        try:
+            return call_with_resilience(
+                provider="semanticscholar",
+                operation="request",
+                func=_request,
+                retry_exceptions=(
+                    requests.exceptions.RequestException,
+                    TransientExternalError,
+                ),
+            )
+        except CircuitOpenError:
+            raise
 
 
     def search(self, query: str, max_results: int = 10) -> List[Dict]:

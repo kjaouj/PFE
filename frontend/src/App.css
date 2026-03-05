@@ -49,10 +49,16 @@ body {
 }
 
 .app-layout {
+  --sidebar-width: 320px;
+  --sidebar-offset: var(--sidebar-width);
   display: flex;
   height: 100vh;
   width: 100vw;
   position: relative;
+}
+
+.app-layout.sidebar-hidden {
+  --sidebar-offset: 0px;
 }
 
 .app-layout::before {
@@ -79,7 +85,7 @@ body {
 
 /* SIDEBAR */
 .sidebar {
-  width: 320px;
+  width: var(--sidebar-width);
   background: var(--bg-sidebar);
   border-right: 1px solid var(--border);
   display: flex;
@@ -531,7 +537,10 @@ input[type="text"]:focus {
 }
 
 .pdf-drawer.fullscreen {
-  width: 100vw;
+  left: var(--sidebar-offset);
+  right: 0;
+  width: auto;
+  max-width: none;
 }
 
 .drawer-section {
@@ -842,9 +851,27 @@ input[type="text"]:focus {
 .mode-selector {
   padding: 12px 10%;
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 12px;
   background: var(--bg-sidebar);
   border-bottom: 1px solid var(--border);
+}
+
+.sidebar-toggle-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  padding: 6px 12px;
+  border-radius: 20px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sidebar-toggle-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .mode-btn {

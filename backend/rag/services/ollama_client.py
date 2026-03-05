@@ -5,6 +5,7 @@ from typing import List, Optional
 import requests
 from django.conf import settings
 from langchain_ollama import OllamaEmbeddings, OllamaLLM
+from functools import lru_cache
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ def _candidate_base_urls() -> List[str]:
     return deduped
 
 
+@lru_cache(maxsize=1)
 def resolve_ollama_base_url(timeout_seconds: float = 1.5) -> Optional[str]:
     for base_url in _candidate_base_urls():
         try:
@@ -67,7 +69,13 @@ def create_embeddings(model: str = "nomic-embed-text") -> OllamaEmbeddings:
 
 def create_llm(model: str = "mistral") -> OllamaLLM:
     base_url = resolve_ollama_base_url()
-    kwargs = {"model": model}
+    kwargs = {
+        "model": model,
+        "temperature": getattr(settings, "RAG_LLM_TEMPERATURE", 0.2),
+        "num_predict": getattr(settings, "RAG_LLM_NUM_PREDICT", 320),
+        "num_ctx": getattr(settings, "RAG_LLM_NUM_CTX", 4096),
+        "keep_alive": getattr(settings, "RAG_LLM_KEEP_ALIVE", "30m"),
+    }
     if base_url:
         kwargs["base_url"] = base_url
     return OllamaLLM(**kwargs)

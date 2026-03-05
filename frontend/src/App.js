@@ -6,6 +6,7 @@ function App() {
   const [sessions, setSessions] = useState([]);
   const [newSessionName, setNewSessionName] = useState("");
   const [isSessionsOpen, setIsSessionsOpen] = useState(true);
+  const [isSidebarVisible, setIsSidebarVisible] = useState(true);
   const [pdfs, setPdfs] = useState([]);
   const [selectedPdfs, setSelectedPdfs] = useState([]);
   const [question, setQuestion] = useState("");
@@ -162,6 +163,16 @@ function App() {
     return "";
   };
 
+  const chooseFallbackSearch = (snippet) => {
+    const cleanSnippet = normalizeForMatch(snippet || "");
+    if (!cleanSnippet) return "";
+
+    const words = cleanSnippet.split(" ").filter(Boolean);
+    if (words.length === 0) return "";
+
+    return words.slice(0, 12).join(" ");
+  };
+
   const openCitationViewer = async (citation) => {
     const filename = citation.source;
     const page = citation.pageOneIndexed
@@ -186,8 +197,9 @@ function App() {
       }
     }
 
-    const exactSearch = precisePhrase ? `"${precisePhrase}"` : "";
-    const viewerUrl = `https://mozilla.github.io/pdf.js/web/viewer.html?file=${encodeURIComponent(docUrl)}#page=${page}${exactSearch ? `&search=${encodeURIComponent(exactSearch)}&phrase=true` : ""}`;
+    const searchQuery = precisePhrase || chooseFallbackSearch(snippet);
+    const usePhraseMatch = Boolean(precisePhrase);
+    const viewerUrl = `https://mozilla.github.io/pdf.js/web/viewer.html?file=${encodeURIComponent(docUrl)}#page=${page}${searchQuery ? `&search=${encodeURIComponent(searchQuery)}${usePhraseMatch ? "&phrase=true" : ""}` : ""}`;
 
     setPdfViewer({
       filename,
@@ -535,9 +547,9 @@ function App() {
   };
 
   return (
-    <div className={`app-layout ${theme === 'light' ? 'light-mode' : ''}`}>
+    <div className={`app-layout ${theme === 'light' ? 'light-mode' : ''} ${isSidebarVisible ? '' : 'sidebar-hidden'}`}>
       {/* Sidebar */}
-      <aside className="sidebar">
+      {isSidebarVisible && <aside className="sidebar">
         <div className="sidebar-header">
           <div style={{ display: 'flex', alignItems: 'center', width: '100%' }}>
             <h1>Scientific Navigator</h1>
@@ -752,11 +764,18 @@ function App() {
             </div>
           </div>
         </div>
-      </aside>
+      </aside>}
 
       {/* Main Content */}
       <main className="main-content">
         <div className="mode-selector">
+          <button
+            className="sidebar-toggle-btn"
+            onClick={() => setIsSidebarVisible((v) => !v)}
+            title={isSidebarVisible ? "Hide sidebar" : "Show sidebar"}
+          >
+            {isSidebarVisible ? "Hide Panel" : "Show Panel"}
+          </button>
           {['qa', 'compare', 'lit_review', 'monitoring'].map(m => (
             <button
               key={m}

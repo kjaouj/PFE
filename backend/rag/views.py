@@ -268,12 +268,17 @@ def ask_question(request):
         "retrieved_chunks_count": 0,
         "confidence_score": None,
     }
+    stage_timings = {
+        "retrieval_ms": None,
+        "generation_ms": None,
+    }
 
     try:
         if mode == "compare":
             distinct_selected = set(sources or [])
             # ---- COMPARE MODE — balanced hybrid retrieval ----
             retrieval = RetrievalService(session.name)
+            retrieval_start = time.perf_counter()
 
             # Force per-source retrieval to avoid source imbalance in comparison.
             scored_docs = []
@@ -296,6 +301,9 @@ def ask_question(request):
             # Keep top chunks by score after balancing
             scored_docs.sort(key=lambda d: d.score, reverse=True)
             scored_docs = scored_docs[:14]
+            stage_timings["retrieval_ms"] = int(
+                (time.perf_counter() - retrieval_start) * 1000
+            )
 
             distinct_retrieved_sources = {
                 d.document.metadata.get("source") for d in scored_docs
@@ -340,7 +348,11 @@ def ask_question(request):
                         sum(d.score for d in scored_docs) / len(scored_docs), 4
                     )
 
+                generation_start = time.perf_counter()
                 result = synthesis_service.compare_papers(question_text, docs, sources)
+                stage_timings["generation_ms"] = int(
+                    (time.perf_counter() - generation_start) * 1000
+                )
                 result["citations"] = retrieved_chunks
 
                 Answer.objects.create(
@@ -353,6 +365,7 @@ def ask_question(request):
         elif mode == "lit_review":
             # ---- LIT REVIEW MODE — hybrid retrieval ----
             retrieval = RetrievalService(session.name)
+            retrieval_start = time.perf_counter()
             scored_docs = retrieval.retrieve(
                 query=question_text,
                 sources=sources or None,
@@ -360,6 +373,9 @@ def ask_question(request):
                 use_hybrid=True,
                 use_multi_query=False,
                 use_reranking=True,
+            )
+            stage_timings["retrieval_ms"] = int(
+                (time.perf_counter() - retrieval_start) * 1000
             )
 
             docs = [sd.document for sd in scored_docs]
@@ -371,8 +387,12 @@ def ask_question(request):
                     sum(d.score for d in scored_docs) / len(scored_docs), 4
                 )
 
+            generation_start = time.perf_counter()
             result = synthesis_service.generate_literature_review(
                 question_text, docs, sources
+            )
+            stage_timings["generation_ms"] = int(
+                (time.perf_counter() - generation_start) * 1000
             )
 
             Answer.objects.create(
@@ -403,6 +423,8 @@ def ask_question(request):
                             "is_insufficient_evidence": False,
                             "retrieved_chunks_count": 0,
                             "confidence_score": 1.0,
+                            "retrieval_ms": 0,
+                            "generation_ms": 0,
                         }
                     elif is_page_count_question(question_text):
                         doc = Document.objects.get(
@@ -418,6 +440,8 @@ def ask_question(request):
                             "is_insufficient_evidence": False,
                             "retrieved_chunks_count": 0,
                             "confidence_score": 1.0,
+                            "retrieval_ms": 0,
+                            "generation_ms": 0,
                         }
                     elif is_about_paper_question(question_text):
                         docs = retrieve_paper_overview(
@@ -456,6 +480,8 @@ def ask_question(request):
             grounding_info["confidence_score"] = result.get(
                 "confidence_score"
             )
+            stage_timings["retrieval_ms"] = result.get("retrieval_ms")
+            stage_timings["generation_ms"] = result.get("generation_ms")
 
             Answer.objects.create(
                 question=question_obj,
@@ -488,6 +514,8 @@ def ask_question(request):
             is_insufficient_evidence=grounding_info["is_insufficient_evidence"],
             retrieved_chunks_count=grounding_info["retrieved_chunks_count"],
             confidence_score=grounding_info["confidence_score"],
+            retrieval_ms=stage_timings["retrieval_ms"],
+            generation_ms=stage_timings["generation_ms"],
         )
 
         return Response(result, status=status.HTTP_200_OK)
@@ -503,6 +531,8 @@ def ask_question(request):
             latency_ms=latency_ms,
             retrieved_chunks=retrieved_chunks,
             error=e,
+            retrieval_ms=stage_timings["retrieval_ms"],
+            generation_ms=stage_timings["generation_ms"],
         )
         return Response(
             {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR

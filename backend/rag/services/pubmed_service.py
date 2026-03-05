@@ -15,6 +15,7 @@ from django.conf import settings
 
 from rag.models import PaperSource, Document, Session
 from rag.services.ingestion import IngestionService
+from rag.services.resilience import call_with_resilience, CircuitOpenError
 from rag.utils import normalize_filename
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,11 @@ class PubmedService:
 
     def __init__(self):
         self.ingestion_service = IngestionService()
+        # Built-in Entrez retry controls.
+        Entrez.max_tries = max(2, int(getattr(settings, "EXTERNAL_API_RETRIES", 3)))
+        Entrez.sleep_between_tries = float(
+            getattr(settings, "EXTERNAL_API_RETRY_BACKOFF_SECONDS", 1.0)
+        )
 
     def search(self, query: str, max_results: int = 10) -> List[Dict]:
         """
@@ -35,7 +41,7 @@ class PubmedService:
         """
         logger.info(f"Searching PubMed: query='{query}', max_results={max_results}")
 
-        try:
+        def _search():
             # Step 1: Search IDs
             handle = Entrez.esearch(db="pubmed", term=query, retmax=max_results)
             record = Entrez.read(handle)
@@ -56,21 +62,37 @@ class PubmedService:
 
             return results
 
+        try:
+            return call_with_resilience(
+                provider="pubmed",
+                operation="search",
+                func=_search,
+                retry_exceptions=(Exception,),
+            )
+        except CircuitOpenError:
+            raise
         except Exception as e:
             logger.error(f"PubMed search failed: {e}")
             raise
 
     def fetch_metadata(self, pubmed_id: str) -> Dict:
         """Fetch full details for a single paper."""
-        try:
+        def _fetch():
             handle = Entrez.esummary(db="pubmed", id=pubmed_id)
             records = Entrez.read(handle)
             handle.close()
             
             if not records:
                 raise ValueError(f"PubMed ID {pubmed_id} not found")
-                
             return self._extract_metadata(records[0])
+
+        try:
+            return call_with_resilience(
+                provider="pubmed",
+                operation="fetch_metadata",
+                func=_fetch,
+                retry_exceptions=(Exception,),
+            )
         except Exception as e:
             logger.error(f"Failed to fetch PubMed metadata: {e}")
             raise

@@ -21,6 +21,7 @@ from django.core.files.storage import default_storage
 
 from rag.models import PaperSource, Document, Session
 from rag.services.ingestion import IngestionService
+from rag.services.resilience import call_with_resilience, CircuitOpenError
 from rag.utils import normalize_filename
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,7 @@ class ArxivService:
         """
         logger.info(f"Searching arXiv: query='{query}', max_results={max_results}")
 
-        try:
+        def _search():
             search = arxiv.Search(
                 query=query,
                 max_results=max_results,
@@ -59,6 +60,15 @@ class ArxivService:
             logger.info(f"Found {len(results)} papers on arXiv")
             return results
 
+        try:
+            return call_with_resilience(
+                provider="arxiv",
+                operation="search",
+                func=_search,
+                retry_exceptions=(Exception,),
+            )
+        except CircuitOpenError:
+            raise
         except Exception as e:
             logger.error(f"arXiv search failed: {e}")
             raise
@@ -69,7 +79,7 @@ class ArxivService:
         """
         logger.info(f"Fetching metadata for arXiv:{arxiv_id}")
 
-        try:
+        def _fetch():
             search = arxiv.Search(id_list=[arxiv_id])
             paper = next(self.client.results(search))
 
@@ -77,6 +87,13 @@ class ArxivService:
             logger.info(f"Retrieved metadata for '{metadata['title'][:50]}...'")
             return metadata
 
+        try:
+            return call_with_resilience(
+                provider="arxiv",
+                operation="fetch_metadata",
+                func=_fetch,
+                retry_exceptions=(Exception,),
+            )
         except StopIteration:
             logger.error(f"arXiv paper not found: {arxiv_id}")
             raise ValueError(f"Paper with arXiv ID '{arxiv_id}' not found")

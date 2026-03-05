@@ -256,6 +256,16 @@ class RunLog(models.Model):
     latency_ms = models.IntegerField(
         help_text="End-to-end query latency in milliseconds"
     )
+    retrieval_ms = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text="Retrieval stage latency in milliseconds (if tracked)"
+    )
+    generation_ms = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text="Generation/synthesis stage latency in milliseconds (if tracked)"
+    )
     retrieved_chunks = models.JSONField(
         help_text="List of retrieved chunks with metadata: [{doc, page, chunk_id, score, text_preview}]"
     )
@@ -312,4 +322,3 @@ class RunLog(models.Model):
             models.Index(fields=['mode']),
             models.Index(fields=['is_refusal']),
         ]
-

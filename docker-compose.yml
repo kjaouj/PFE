@@ -21,6 +21,10 @@ services:
   ollama:
     image: ollama/ollama:latest
     restart: unless-stopped
+    environment:
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30m}
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-2}
+      OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-2}
     volumes:
       - ollama_data:/root/.ollama
 
@@ -50,6 +54,15 @@ services:
       CORS_ALLOW_ALL: "True"
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
       CHROMA_PERSIST_DIR: /app/data/chroma
+      RAG_QA_USE_HYBRID: ${RAG_QA_USE_HYBRID:-True}
+      RAG_QA_USE_MULTI_QUERY: ${RAG_QA_USE_MULTI_QUERY:-False}
+      RAG_QA_USE_RERANKING: ${RAG_QA_USE_RERANKING:-True}
+      RAG_QA_TOP_K: ${RAG_QA_TOP_K:-8}
+      RAG_LLM_MODEL: ${RAG_LLM_MODEL:-mistral}
+      RAG_LLM_NUM_PREDICT: ${RAG_LLM_NUM_PREDICT:-320}
+      RAG_LLM_TEMPERATURE: ${RAG_LLM_TEMPERATURE:-0.2}
+      RAG_LLM_NUM_CTX: ${RAG_LLM_NUM_CTX:-4096}
+      RAG_LLM_KEEP_ALIVE: ${RAG_LLM_KEEP_ALIVE:-30m}
     volumes:
       - chroma_data:/app/data/chroma
       - media_data:/app/media

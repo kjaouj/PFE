@@ -101,3 +101,46 @@ graph TD
 - **Hardware Acceleration**: GPU acceleration for Ollama is highly recommended for viable latencies.
 - **Hallucination Control**: The system is intentionally conservative. If it cannot find a definitive answer in the provided sources, it will state so rather than hallucinating metadata or content.
 - **Environment**: This project is optimized for Windows (WSL) and Linux environments.
+
+---
+
+## Reliability Toolkit (Implemented)
+
+### 1. Automated Tests
+The backend now includes:
+- **Unit tests** for citation serialization/deduplication and resilience behavior.
+- **API flow tests** for upload/list, ask-with-citations, highlight create/search.
+- **Regression tests** for page-text alignment (1-indexed page mapping used by citation click/highlight behavior).
+
+Run all backend tests:
+```bash
+cd backend
+source venv/bin/activate
+python manage.py test rag -v 2
+```
+
+Run specific suites:
+```bash
+python manage.py test rag.test_citations_and_alignment -v 2
+python manage.py test rag.test_api_flows -v 2
+python manage.py test rag.test_resilience -v 2
+```
+
+### 2. External Provider Resilience
+External connectors now use:
+- **Retry with exponential backoff**
+- **Per-provider circuit breaker** (in-memory)
+- **Request timeouts** for HTTP-based calls
+
+Providers covered:
+- arXiv
+- PubMed
+- Semantic Scholar (including ACL/medRxiv paths via Semantic Scholar service inheritance)
+
+Configure in `backend/.env`:
+```env
+EXTERNAL_API_RETRIES=3
+EXTERNAL_API_RETRY_BACKOFF_SECONDS=1.0
+EXTERNAL_API_CIRCUIT_FAILURE_THRESHOLD=5
+EXTERNAL_API_CIRCUIT_OPEN_SECONDS=60
+```

@@ -88,12 +88,19 @@ class RetrievalService:
     ):
         self.session_name = session_name
         self.embeddings = create_embeddings(model=embedding_model)
-        self.llm = create_llm(model=llm_model)
+        self.llm_model = llm_model
+        self._llm = None
         self.persist_dir = get_session_path(session_name)
         self.vectordb = Chroma(
             persist_directory=self.persist_dir,
             embedding_function=self.embeddings,
         )
+        self._bm25_corpus_cache: Dict[str, Tuple[List[str], List[dict]]] = {}
+
+    def _get_llm(self):
+        if self._llm is None:
+            self._llm = create_llm(model=self.llm_model)
+        return self._llm
 
     # ================================================================
     #  PUBLIC API
@@ -233,19 +240,7 @@ class RetrievalService:
     ) -> List[ScoredDocument]:
         """BM25 keyword search over the Chroma collection."""
         try:
-            # Pull all matching documents from the store
-            if sources:
-                where = (
-                    {"source": {"$in": sources}}
-                    if len(sources) > 1
-                    else {"source": sources[0]}
-                )
-                collection_data = self.vectordb.get(where=where)
-            else:
-                collection_data = self.vectordb.get()
-
-            documents = collection_data.get("documents") or []
-            metadatas = collection_data.get("metadatas") or []
+            documents, metadatas = self._get_bm25_corpus(sources)
 
             if not documents:
                 return []
@@ -274,6 +269,30 @@ class RetrievalService:
         except Exception as e:
             logger.warning(f"BM25 search failed: {e}")
             return []
+
+    def _get_bm25_corpus(
+        self, sources: Optional[List[str]]
+    ) -> Tuple[List[str], List[dict]]:
+        """Cache corpus fetches so hybrid+multi-query doesn't re-read Chroma repeatedly."""
+        cache_key = ",".join(sorted(sources)) if sources else "__all__"
+        cached = self._bm25_corpus_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        if sources:
+            where = (
+                {"source": {"$in": sources}}
+                if len(sources) > 1
+                else {"source": sources[0]}
+            )
+            collection_data = self.vectordb.get(where=where)
+        else:
+            collection_data = self.vectordb.get()
+
+        documents = collection_data.get("documents") or []
+        metadatas = collection_data.get("metadatas") or []
+        self._bm25_corpus_cache[cache_key] = (documents, metadatas)
+        return documents, metadatas
 
     def _hybrid_search(
         self, query: str, sources: Optional[List[str]], k: int
@@ -363,7 +382,7 @@ class RetrievalService:
                 f"Reformulated questions:"
             )
 
-            response = self.llm.invoke(prompt)
+            response = self._get_llm().invoke(prompt)
             variants = [
                 line.strip().lstrip("0123456789.-) ")
                 for line in response.strip().split("\n")
@@ -412,7 +431,7 @@ class RetrievalService:
                 f"Information already found:\n{snippets}\n\n"
                 f"Follow-up question (one line):"
             )
-            response = self.llm.invoke(prompt)
+            response = self._get_llm().invoke(prompt)
             refined = response.strip().split("\n")[0].strip()
             return refined if len(refined) > 10 else original_query
         except Exception as e:

@@ -4,7 +4,6 @@ Metrics Service
 Logs and aggregates performance and quality metrics for RAG queries,
 including grounding / refusal tracking.
 """
-import time
 from typing import List, Dict, Any, Optional
 from django.utils import timezone
 from django.db.models import Avg, Count, F
@@ -34,6 +33,8 @@ class MetricsService:
         is_insufficient_evidence: bool = False,
         retrieved_chunks_count: int = 0,
         confidence_score: Optional[float] = None,
+        retrieval_ms: Optional[int] = None,
+        generation_ms: Optional[int] = None,
     ) -> RunLog:
         """
         Log a single query execution, including grounding metrics.
@@ -58,6 +59,8 @@ class MetricsService:
             is_insufficient_evidence=is_insufficient_evidence,
             retrieved_chunks_count=retrieved_chunks_count,
             confidence_score=confidence_score,
+            retrieval_ms=retrieval_ms,
+            generation_ms=generation_ms,
         )
         return log
 
@@ -82,6 +85,9 @@ class MetricsService:
                 "total": total_queries,
                 "by_mode": {},
                 "latency_avg_ms": 0,
+                "retrieval_avg_ms": 0,
+                "generation_avg_ms": 0,
+                "orchestration_avg_ms": 0,
             },
             "errors": {
                 "count": 0,
@@ -111,11 +117,28 @@ class MetricsService:
         # ---- Query stats ----
         by_mode = logs.values("mode").annotate(count=Count("id"))
         latency_avg = logs.aggregate(avg=Avg("latency_ms"))["avg"]
+        retrieval_avg = logs.aggregate(avg=Avg("retrieval_ms"))["avg"]
+        generation_avg = logs.aggregate(avg=Avg("generation_ms"))["avg"]
 
         summary["queries"]["by_mode"] = {
             item["mode"]: item["count"] for item in by_mode
         }
         summary["queries"]["latency_avg_ms"] = int(latency_avg or 0)
+        summary["queries"]["retrieval_avg_ms"] = int(retrieval_avg or 0)
+        summary["queries"]["generation_avg_ms"] = int(generation_avg or 0)
+
+        breakdown_logs = logs.filter(
+            retrieval_ms__isnull=False,
+            generation_ms__isnull=False,
+        ).values_list("latency_ms", "retrieval_ms", "generation_ms")
+        if breakdown_logs:
+            orchestration_values = [
+                max(0, total - retrieval - generation)
+                for total, retrieval, generation in breakdown_logs
+            ]
+            summary["queries"]["orchestration_avg_ms"] = int(
+                sum(orchestration_values) / len(orchestration_values)
+            )
 
         # ---- Error stats ----
         errors = logs.exclude(error_type__isnull=True)

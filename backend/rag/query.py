@@ -8,9 +8,11 @@ Handles question-answering with:
 """
 
 import logging
+import time
 from typing import List, Dict, Optional, Any
 
 from langchain_chroma import Chroma
+from django.conf import settings
 
 from rag.utils import get_session_path
 from rag.services.retrieval import RetrievalService, ScoredDocument
@@ -94,20 +96,25 @@ def ask_with_citations(
         retrieved_chunks_count, confidence_score
     """
 
+    retrieval_start = time.perf_counter()
+
     # ---- 1. Retrieve ----
     if docs_override is not None:
         # Specialised routes pass raw LangChain documents directly
         scored_docs = [ScoredDocument(d, score=1.0) for d in docs_override]
     else:
         retrieval = RetrievalService(session_name)
+        effective_k = max(1, min(k, int(getattr(settings, "RAG_QA_TOP_K", k))))
         scored_docs = retrieval.retrieve(
             query=question,
             sources=sources,
-            k=k,
-            use_hybrid=True,
-            use_multi_query=True,
-            use_reranking=True,
+            k=effective_k,
+            use_hybrid=getattr(settings, "RAG_QA_USE_HYBRID", True),
+            use_multi_query=getattr(settings, "RAG_QA_USE_MULTI_QUERY", False),
+            use_reranking=getattr(settings, "RAG_QA_USE_RERANKING", True),
         )
+
+    retrieval_ms = int((time.perf_counter() - retrieval_start) * 1000)
 
     if not scored_docs:
         answer_text = (
@@ -121,6 +128,8 @@ def ask_with_citations(
             **classification,
             "retrieved_chunks_count": 0,
             "confidence_score": 0.0,
+            "retrieval_ms": retrieval_ms,
+            "generation_ms": 0,
         }
 
     # ---- 2. Build context ----
@@ -134,7 +143,8 @@ def ask_with_citations(
     context = "\n\n".join(context_parts)
 
     # ---- 3. Generate answer ----
-    llm = create_llm(model="mistral")
+    generation_start = time.perf_counter()
+    llm = create_llm(model=getattr(settings, "RAG_LLM_MODEL", "mistral"))
 
     prompt = f"""You are a precise scientific research assistant.
 
@@ -151,13 +161,17 @@ CONTEXT:
 QUESTION:
 {question}
 
-THINKING PROCESS:
-(Analyze the context step-by-step before providing your final answer)
-
 ANSWER:
 """
 
     response = llm.invoke(prompt)
+    generation_ms = int((time.perf_counter() - generation_start) * 1000)
+    logger.info(
+        "qa_timing_ms retrieval=%s generation=%s total=%s",
+        retrieval_ms,
+        generation_ms,
+        retrieval_ms + generation_ms,
+    )
 
     # Strip the thinking section
     if "ANSWER:" in response:
@@ -179,6 +193,8 @@ ANSWER:
         **classification,
         "retrieved_chunks_count": len(scored_docs),
         "confidence_score": round(avg_score, 4),
+        "retrieval_ms": retrieval_ms,
+        "generation_ms": generation_ms,
     }
 
 

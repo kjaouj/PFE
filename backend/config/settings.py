@@ -142,3 +142,38 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "data/chroma")
+
+# ----- RAG / QA performance knobs -----
+RAG_QA_USE_HYBRID = os.getenv("RAG_QA_USE_HYBRID", "True").lower() in (
+    "true",
+    "1",
+    "yes",
+)
+RAG_QA_USE_MULTI_QUERY = os.getenv("RAG_QA_USE_MULTI_QUERY", "False").lower() in (
+    "true",
+    "1",
+    "yes",
+)
+RAG_QA_USE_RERANKING = os.getenv("RAG_QA_USE_RERANKING", "True").lower() in (
+    "true",
+    "1",
+    "yes",
+)
+RAG_QA_TOP_K = int(os.getenv("RAG_QA_TOP_K", "8"))
+RAG_LLM_MODEL = os.getenv("RAG_LLM_MODEL", "mistral")
+RAG_LLM_NUM_PREDICT = int(os.getenv("RAG_LLM_NUM_PREDICT", "320"))
+RAG_LLM_TEMPERATURE = float(os.getenv("RAG_LLM_TEMPERATURE", "0.2"))
+RAG_LLM_NUM_CTX = int(os.getenv("RAG_LLM_NUM_CTX", "4096"))
+RAG_LLM_KEEP_ALIVE = os.getenv("RAG_LLM_KEEP_ALIVE", "30m")
+
+# ----- External provider resilience -----
+EXTERNAL_API_RETRIES = int(os.getenv("EXTERNAL_API_RETRIES", "3"))
+EXTERNAL_API_RETRY_BACKOFF_SECONDS = float(
+    os.getenv("EXTERNAL_API_RETRY_BACKOFF_SECONDS", "1.0")
+)
+EXTERNAL_API_CIRCUIT_FAILURE_THRESHOLD = int(
+    os.getenv("EXTERNAL_API_CIRCUIT_FAILURE_THRESHOLD", "5")
+)
+EXTERNAL_API_CIRCUIT_OPEN_SECONDS = float(
+    os.getenv("EXTERNAL_API_CIRCUIT_OPEN_SECONDS", "60")
+)
