@@ -1430,3 +1430,190 @@ h4 {
 .app-layout.light-mode .pdf-frame {
   box-shadow: 0 10px 22px rgba(15, 40, 70, 0.12);
 }
+
+/* 2026 UI refresh */
+.app-layout {
+  --sidebar-width: min(360px, 38vw);
+}
+
+.sidebar-scroll {
+  padding: 18px;
+}
+
+.section-header {
+  margin-bottom: 12px;
+}
+
+.source-management .section-label {
+  margin-bottom: 0;
+}
+
+.source-item {
+  padding: 14px;
+  border-radius: 14px;
+  gap: 12px;
+}
+
+.source-title {
+  font-size: 0.9rem;
+}
+
+.source-meta {
+  margin-top: 4px;
+}
+
+.source-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  background: transparent;
+  padding: 0;
+}
+
+.source-tab {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+}
+
+.source-tab.active {
+  border-color: var(--accent);
+}
+
+.external-source-hint {
+  margin: 10px 0 12px;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.external-error {
+  margin-top: 8px;
+  color: var(--danger);
+  font-size: 0.78rem;
+}
+
+.main-content {
+  overflow: hidden;
+}
+
+.mode-selector {
+  padding: 14px clamp(16px, 3vw, 34px);
+  gap: 10px;
+}
+
+.chat-container {
+  padding: clamp(18px, 3vw, 34px) clamp(16px, 5vw, 76px);
+  gap: 24px;
+}
+
+.global-highlight-search {
+  padding: 12px clamp(16px, 3vw, 34px);
+}
+
+.input-area {
+  padding: 16px clamp(16px, 5vw, 76px) 24px;
+}
+
+.chat-input-wrapper {
+  border-radius: 20px;
+  padding: 10px 14px;
+}
+
+.chat-input-wrapper input {
+  font-size: 0.95rem;
+}
+
+.workspace-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px clamp(16px, 3vw, 34px) 12px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(12, 25, 43, 0.45), rgba(12, 25, 43, 0.2));
+}
+
+.summary-chip {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 0.75rem;
+}
+
+.summary-chip strong {
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
+.status-indicator {
+  right: clamp(16px, 3vw, 34px);
+}
+
+@media (max-width: 1100px) {
+  .app-layout {
+    --sidebar-width: 320px;
+  }
+
+  .source-tabs {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 900px) {
+  body {
+    overflow: auto;
+  }
+
+  .app-layout {
+    height: auto;
+    min-height: 100vh;
+  }
+
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    height: 100vh;
+    z-index: 40;
+  }
+
+  .app-layout.sidebar-hidden .sidebar {
+    display: none;
+  }
+
+  .mode-selector {
+    padding-right: 92px;
+  }
+
+  .status-indicator {
+    top: 10px;
+    font-size: 0.68rem;
+  }
+
+  .workspace-summary {
+    gap: 6px;
+  }
+
+  .summary-chip {
+    font-size: 0.68rem;
+  }
+
+  .chat-container {
+    padding: 18px 14px;
+  }
+
+  .global-highlight-search,
+  .input-area {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+
+  .sidebar-toggle-btn {
+    position: absolute;
+    right: 14px;
+    top: 12px;
+  }
+}

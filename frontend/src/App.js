@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import "./App.css";
+import { api, API_BASE } from "./api";
 
 function App() {
   const [session, setSession] = useState("Research Session");
@@ -24,8 +25,18 @@ function App() {
   const [highlightSearchResults, setHighlightSearchResults] = useState([]);
   const [highlightSearchLoading, setHighlightSearchLoading] = useState(false);
   const [isPdfDrawerFullscreen, setIsPdfDrawerFullscreen] = useState(false);
+  const [externalLoading, setExternalLoading] = useState(false);
+  const [externalError, setExternalError] = useState("");
   const fileInputRef = useRef(null);
   const chatEndRef = useRef(null);
+
+  const externalSources = [
+    { id: "arxiv", label: "arXiv", hint: "Computer science, physics and math preprints" },
+    { id: "pubmed", label: "PubMed", hint: "Biomedical and life-science publications" },
+    { id: "semanticscholar", label: "Semantic Scholar", hint: "Citation graph and broad metadata search" },
+    { id: "acl", label: "ACL", hint: "NLP and computational linguistics papers" },
+    { id: "medrxiv", label: "medRxiv", hint: "Health-science preprints and early findings" },
+  ];
 
   // Theme management
   useEffect(() => {
@@ -82,11 +93,8 @@ function App() {
 
   const loadSessions = async () => {
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/sessions/");
-      if (res.ok) {
-        const data = await res.json();
-        setSessions(data);
-      }
+      const data = await api.listSessions();
+      setSessions(data || []);
     } catch (err) {
       console.error("Failed to load sessions", err);
     }
@@ -94,13 +102,8 @@ function App() {
 
   const loadHistory = async () => {
     try {
-      const res = await fetch(
-        `http://127.0.0.1:8000/api/history/?session=${encodeURIComponent(session)}`
-      );
-      if (res.ok) {
-        const data = await res.json();
-        setMessages(data.history || []);
-      }
+      const data = await api.listHistory(session);
+      setMessages(data?.history || []);
     } catch (err) {
       console.error("Failed to load history", err);
     }
@@ -108,13 +111,8 @@ function App() {
 
   const loadPdfs = async () => {
     try {
-      const res = await fetch(
-        `http://127.0.0.1:8000/api/pdfs/?session=${encodeURIComponent(session)}`
-      );
-      if (res.ok) {
-        const data = await res.json();
-        setPdfs(data.pdfs || []);
-      }
+      const data = await api.listPdfs(session);
+      setPdfs(data?.pdfs || []);
     } catch (err) {
       console.error("Failed to load PDFs", err);
     }
@@ -122,11 +120,8 @@ function App() {
 
   const loadMetrics = async () => {
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/metrics/summary/");
-      if (res.ok) {
-        const data = await res.json();
-        setMetrics(data);
-      }
+      const data = await api.listMetrics();
+      setMetrics(data);
     } catch (err) {
       console.error("Failed to load metrics", err);
     }
@@ -179,19 +174,14 @@ function App() {
       ? Number(citation.page || 1)
       : Number(citation.page || 0) + 1;
     const snippet = (citation.snippet || "").trim();
-    const docUrl = `http://127.0.0.1:8000/media/pdfs/${encodeURIComponent(filename)}`;
+    const docUrl = `${API_BASE}/media/pdfs/${encodeURIComponent(filename)}`;
 
     let precisePhrase = "";
     const doc = pdfs.find((p) => p.filename === filename);
     if (doc) {
       try {
-        const res = await fetch(
-          `http://127.0.0.1:8000/api/documents/${doc.id}/page-text/?page=${page}`
-        );
-        if (res.ok) {
-          const payload = await res.json();
-          precisePhrase = choosePrecisePhrase(snippet, payload.text || "");
-        }
+        const payload = await api.getDocumentPageText(doc.id, page);
+        precisePhrase = choosePrecisePhrase(snippet, payload?.text || "");
       } catch (err) {
         console.error("Failed fetching page text for precise highlight", err);
       }
@@ -216,9 +206,8 @@ function App() {
     if (!doc) return setHighlights([]);
 
     try {
-      const res = await fetch(`http://127.0.0.1:8000/api/highlights/?document_id=${doc.id}`);
-      const data = await res.json();
-      if (res.ok) setHighlights(data.highlights || []);
+      const data = await api.listHighlights(doc.id);
+      setHighlights(data?.highlights || []);
     } catch (err) {
       console.error("Failed to load highlights", err);
     }
@@ -235,28 +224,19 @@ function App() {
       .filter(Boolean);
 
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/highlights/", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          document_id: doc.id,
-          page: pdfViewer.page,
-          start_offset: 0,
-          end_offset: pdfViewer.snippet.length,
-          text: pdfViewer.snippet,
-          note: highlightNote,
-          tags,
-        }),
+      await api.createHighlight({
+        document_id: doc.id,
+        page: pdfViewer.page,
+        start_offset: 0,
+        end_offset: pdfViewer.snippet.length,
+        text: pdfViewer.snippet,
+        note: highlightNote,
+        tags,
       });
-      const data = await res.json();
-      if (res.ok) {
-        setHighlightNote("");
-        setHighlightTags("");
-        await loadHighlightsForDocument(pdfViewer.filename);
-        setStatus("Highlight saved");
-      } else {
-        setStatus(data.error || "Failed to save highlight");
-      }
+      setHighlightNote("");
+      setHighlightTags("");
+      await loadHighlightsForDocument(pdfViewer.filename);
+      setStatus("Highlight saved");
     } catch (err) {
       setStatus("Failed to save highlight");
     }
@@ -264,10 +244,8 @@ function App() {
 
   const deleteHighlight = async (highlightId) => {
     try {
-      const res = await fetch(`http://127.0.0.1:8000/api/highlights/${highlightId}/`, {
-        method: "DELETE",
-      });
-      if (res.ok && pdfViewer?.filename) {
+      await api.deleteHighlight(highlightId);
+      if (pdfViewer?.filename) {
         await loadHighlightsForDocument(pdfViewer.filename);
       }
     } catch (err) {
@@ -278,15 +256,8 @@ function App() {
   const runHighlightSearch = async (query) => {
     if (!query || !session) return;
     try {
-      const res = await fetch(
-        `http://127.0.0.1:8000/api/highlights/search/?session=${encodeURIComponent(session)}&q=${encodeURIComponent(query)}`
-      );
-      const data = await res.json();
-      if (res.ok) {
-        setHighlightSearchResults(data.results || []);
-      } else {
-        setHighlightSearchResults([]);
-      }
+      const data = await api.searchHighlights({ session, q: query });
+      setHighlightSearchResults(data?.results || []);
     } catch (err) {
       console.error("Highlight search failed", err);
       setHighlightSearchResults([]);
@@ -309,17 +280,11 @@ function App() {
 
     setStatus("Creating session...");
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/session/", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: newSessionName }),
-      });
-      if (res.ok) {
-        setSession(newSessionName);
-        setNewSessionName("");
-        await loadSessions();
-        setStatus("Session ready");
-      }
+      await api.createSession(newSessionName);
+      setSession(newSessionName);
+      setNewSessionName("");
+      await loadSessions();
+      setStatus("Session ready");
     } catch (err) {
       setStatus("Error creating session");
     }
@@ -331,18 +296,14 @@ function App() {
 
     setStatus("Deleting session data...");
     try {
-      const res = await fetch(`http://127.0.0.1:8000/api/session/${encodeURIComponent(name)}/`, {
-        method: "DELETE",
-      });
-      if (res.ok) {
-        if (session === name) {
-          setSession("");
-          setPdfs([]);
-          setMessages([]);
-        }
-        await loadSessions();
-        setStatus("Session deleted");
+      await api.deleteSession(name);
+      if (session === name) {
+        setSession("");
+        setPdfs([]);
+        setMessages([]);
       }
+      await loadSessions();
+      setStatus("Session deleted");
     } catch (err) {
       console.error("Delete failed", err);
       setStatus("Delete failed");
@@ -354,6 +315,7 @@ function App() {
   const [arxivResults, setArxivResults] = useState([]);
   const [isArxivOpen, setIsArxivOpen] = useState(false);
   const [previewId, setPreviewId] = useState(null);
+  const activeExternalSource = externalSources.find((src) => src.id === searchSource) || externalSources[0];
 
   // Poll for processing PDFs
   useEffect(() => {
@@ -378,12 +340,8 @@ function App() {
     setLoading(true);
 
     try {
-      const response = await fetch("http://127.0.0.1:8000/api/upload/", {
-        method: "POST",
-        body: formData,
-      });
-      const data = await response.json();
-      setStatus(data.message || "Upload initiated");
+      const data = await api.uploadPdf(formData);
+      setStatus(data?.message || "Upload initiated");
       loadPdfs();
     } catch (err) {
       setStatus("Upload failed");
@@ -396,41 +354,33 @@ function App() {
     e?.preventDefault();
     if (!arxivQuery.trim()) return;
     setStatus(`Searching ${searchSource.toUpperCase()}...`);
+    setExternalLoading(true);
+    setExternalError("");
     try {
-      const res = await fetch(`http://127.0.0.1:8000/api/search/external/?q=${encodeURIComponent(arxivQuery)}&source=${searchSource}`);
-      const data = await res.json();
-      if (res.ok) {
-        setArxivResults(data.results || []);
-        setStatus(data.results?.length > 0 ? "Search complete" : "No results found");
-      } else {
-        if (res.status === 429) {
-          setStatus(`${searchSource.toUpperCase()}: Too many requests. Please wait.`);
-        } else {
-          setStatus("Search Error: " + (data.error || "Unknown"));
-        }
-      }
+      const data = await api.searchExternal({ q: arxivQuery, source: searchSource });
+      setArxivResults(data?.results || []);
+      setStatus(data?.results?.length > 0 ? "Search complete" : "No results found");
     } catch (err) {
+      if (err.status === 429) {
+        setExternalError(`${searchSource.toUpperCase()}: Too many requests. Please wait.`);
+      } else {
+        setExternalError(err?.message || "External search failed");
+      }
       setStatus("External search failed");
+      setArxivResults([]);
+    } finally {
+      setExternalLoading(false);
     }
   };
 
   const importExternal = async (id) => {
     setStatus(`Importing from ${searchSource.toUpperCase()}...`);
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/import/external/", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id, source: searchSource, session }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setStatus("Import initiated");
-        loadPdfs();
-      } else {
-        setStatus("Import failed: " + (data.error || "Unknown"));
-      }
+      await api.importExternal({ id, source: searchSource, session });
+      setStatus("Import initiated");
+      loadPdfs();
     } catch (err) {
-      setStatus("Import failed");
+      setStatus("Import failed: " + (err?.message || "Unknown"));
     }
   };
 
@@ -445,43 +395,34 @@ function App() {
     setStatus("Thinking...");
 
     try {
-      const response = await fetch("http://127.0.0.1:8000/api/ask/", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          question: question,
-          sources: selectedPdfs,
-          session,
-          mode: mode
-        }),
+      const data = await api.ask({
+        question: question,
+        sources: selectedPdfs,
+        session,
+        mode: mode,
       });
 
-      const data = await response.json();
-      if (response.ok) {
-        if (mode === "compare") {
-          setMessages(prev => [...prev, {
-            role: "assistant",
-            text: `Comparison for: "${question}"`,
-            comparison: data,
-            citations: data.citations || [],
-          }]);
-        } else if (mode === "lit_review") {
-          setMessages(prev => [...prev, {
-            role: "assistant",
-            text: data.content,
-            title: data.title || "Literature Review"
-          }]);
-        } else {
-          setMessages(prev => [...prev, {
-            role: "assistant",
-            text: data.answer,
-            citations: data.citations || []
-          }]);
-        }
-        setStatus("Ready");
+      if (mode === "compare") {
+        setMessages(prev => [...prev, {
+          role: "assistant",
+          text: `Comparison for: "${question}"`,
+          comparison: data,
+          citations: data.citations || [],
+        }]);
+      } else if (mode === "lit_review") {
+        setMessages(prev => [...prev, {
+          role: "assistant",
+          text: data.content,
+          title: data.title || "Literature Review"
+        }]);
       } else {
-        throw new Error(data.error || "Backend error");
+        setMessages(prev => [...prev, {
+          role: "assistant",
+          text: data.answer,
+          citations: data.citations || []
+        }]);
       }
+      setStatus("Ready");
     } catch (err) {
       setMessages(prev => [...prev, {
         role: "assistant",
@@ -512,15 +453,9 @@ function App() {
     if (!window.confirm(`Remove ${filename} from this session?`)) return;
 
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/delete/", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session, filename }),
-      });
-      if (res.ok) {
-        loadPdfs();
-        setSelectedPdfs(prev => prev.filter(p => p !== filename));
-      }
+      await api.deletePdf({ session, filename });
+      loadPdfs();
+      setSelectedPdfs(prev => prev.filter(p => p !== filename));
     } catch (err) {
       console.error("Delete failed", err);
     }
@@ -530,19 +465,11 @@ function App() {
     e.stopPropagation();
     setStatus(`Retrying ingestion for ${pdf.filename}...`);
     try {
-      const res = await fetch(
-        `http://127.0.0.1:8000/api/documents/${pdf.id}/retry/`,
-        { method: "POST" }
-      );
-      const data = await res.json();
-      if (res.ok) {
-        setStatus(data.message || "Retry initiated");
-        await loadPdfs();
-      } else {
-        setStatus(data.error || "Retry failed");
-      }
+      const data = await api.retryDocument(pdf.id);
+      setStatus(data?.message || "Retry initiated");
+      await loadPdfs();
     } catch (err) {
-      setStatus("Retry failed");
+      setStatus(err?.message || "Retry failed");
     }
   };
 
@@ -558,7 +485,7 @@ function App() {
               onClick={toggleTheme}
               title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
             >
-              {theme === "dark" ? "☀️" : "🌙"}
+              {theme === "dark" ? "Light" : "Dark"}
             </button>
           </div>
         </div>
@@ -567,7 +494,7 @@ function App() {
           <div className="session-config">
             <span className="section-label" onClick={() => setIsSessionsOpen(!isSessionsOpen)}>
               Your Sessions
-              <span className={`toggle-icon ${isSessionsOpen ? 'open' : ''}`}>▶</span>
+              <span className={`toggle-icon ${isSessionsOpen ? 'open' : ''}`}>{">"}</span>
             </span>
 
             <div className={`session-list ${isSessionsOpen ? '' : 'collapsed'}`}
@@ -579,7 +506,7 @@ function App() {
                   onClick={() => setSession(s.name)}
                 >
                   <div className="session-content">
-                    <span className="session-item-icon">📁</span>
+                    <span className="session-item-icon">Dir</span>
                     {s.name}
                   </div>
                   <button
@@ -618,41 +545,47 @@ function App() {
             {isArxivOpen && (
               <div className="arxiv-search-box">
                 <div className="source-tabs">
-                  {['arxiv', 'pubmed', 'semanticscholar', 'acl', 'medrxiv'].map(src => (
+                  {externalSources.map((src) => (
                     <button
-                      key={src}
-                      className={`source-tab ${searchSource === src ? 'active' : ''}`}
+                      key={src.id}
+                      className={`source-tab ${searchSource === src.id ? "active" : ""}`}
                       onClick={() => {
-                        setSearchSource(src);
+                        setSearchSource(src.id);
                         setArxivResults([]);
+                        setPreviewId(null);
+                        setExternalError("");
                       }}
                     >
-                      {src === 'semanticscholar' ? 'Scholar' : (src === 'medrxiv' ? 'medRxiv' : src.toUpperCase())}
+                      {src.label}
                     </button>
                   ))}
 
                 </div>
+                <p className="external-source-hint">{activeExternalSource.hint}</p>
                 <form className="input-group" onSubmit={searchExternal}>
                   <input
                     type="text"
                     value={arxivQuery}
                     onChange={(e) => setArxivQuery(e.target.value)}
-                    placeholder={`Search ${searchSource}...`}
+                    placeholder={`Search ${activeExternalSource.label}...`}
                   />
-                  <button type="submit" className="btn-icon" disabled={loading}>🔍</button>
+                  <button type="submit" className="btn-icon" disabled={externalLoading}>
+                    {externalLoading ? "..." : "Go"}
+                  </button>
                 </form>
+                {externalError && <p className="external-error">{externalError}</p>}
                 <div className="arxiv-results">
                   {arxivResults.map((res, i) => (
                     <div key={i} className={`arxiv-result-item ${previewId === res.id ? 'expanded' : ''}`}>
                       <div className="arxiv-res-header" onClick={() => setPreviewId(previewId === res.id ? null : res.id)}>
                         <p className="arxiv-res-title">{res.title}</p>
-                        <span className="expand-chevron">{previewId === res.id ? '▼' : '▶'}</span>
+                        <span className="expand-chevron">{previewId === res.id ? "v" : ">"}</span>
                       </div>
 
                       {previewId === res.id && (
                         <div className="arxiv-res-preview">
                           <p className="arxiv-meta"><strong>Authors:</strong> {res.authors?.join(', ')}</p>
-                          <p className="arxiv-meta"><strong>Link:</strong> {res.date}</p>
+                          <p className="arxiv-meta"><strong>Date:</strong> {res.date || "n/a"}</p>
                           <div className="arxiv-abstract-container">
                             <strong>Abstract:</strong>
                             <p className="arxiv-abstract">{res.abstract}</p>
@@ -665,7 +598,7 @@ function App() {
                               className="arxiv-link-btn"
                               onClick={(e) => e.stopPropagation()}
                             >
-                              Explore ↗
+                              Open Paper
                             </a>
                             <button
                               className="mini-btn"
@@ -730,7 +663,7 @@ function App() {
                         {pdf.title || "Untitled Paper"}
                       </span>
                       <span className="source-meta">
-                        {pdf.filename} • <span className={`status-badge ${(pdf.error_message?.includes('Summary-only') ? 'summary' : (pdf.status || 'INDEXED').toLowerCase())}`}>
+                        {pdf.filename} - <span className={`status-badge ${(pdf.error_message?.includes('Summary-only') ? 'summary' : (pdf.status || 'INDEXED').toLowerCase())}`}>
                           {pdf.error_message?.includes('Summary-only') ? 'SUMMARY' : (pdf.status || 'INDEXED')}
                         </span>
                       </span>
@@ -787,6 +720,12 @@ function App() {
           ))}
         </div>
         {status && <div className="status-indicator">{status}</div>}
+        <div className="workspace-summary">
+          <span className="summary-chip"><strong>Session:</strong> {session || "None"}</span>
+          <span className="summary-chip"><strong>Selected Sources:</strong> {selectedPdfs.length}</span>
+          <span className="summary-chip"><strong>Total Sources:</strong> {pdfs.length}</span>
+          {mode !== "monitoring" && <span className="summary-chip"><strong>Mode:</strong> {mode.replace("_", " ").toUpperCase()}</span>}
+        </div>
 
         {mode !== "monitoring" && (
           <div className="global-highlight-search">
@@ -1075,7 +1014,7 @@ function App() {
                 className="btn-icon"
                 disabled={loading || !question.trim()}
               >
-                ➔
+                Send
               </button>
             </form>
           </div>

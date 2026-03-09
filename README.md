@@ -1,146 +1,205 @@
 # Scientific Research Navigator
 
-A **session-based Retrieval-Augmented Generation (RAG)** system designed for researchers to explore, analyze, and synthesize scientific literature with strict grounding and citation support.
+Scientific Research Navigator is a session-scoped, local-first RAG platform for scientific papers.
 
+It combines:
+- A Django + DRF backend for session/document/query orchestration
+- Chroma vector indexes per session
+- Ollama-hosted local embedding + generation models
+- A React frontend for ingestion, grounded Q&A, comparison, literature review, monitoring, and highlight workflows
 
----
+## What Is Implemented Now
 
-## Key Features
+### Core Workspace
+- Session management: create/list/delete sessions
+- Session isolation: each session has isolated documents, chat history, and Chroma persist path
+- Document management: upload/list/delete PDFs, ingestion status, retry ingestion
+- Chat history: persisted as Question/Answer records per session
 
-### Isolated Research Sessions
-- **Contextual Integrity**: Each session maintains its own isolated vector store (Chroma), document list, and conversation history.
-- **No Contamination**: Researching "Quantum Computing" in one session won't bleed into your "Molecular Biology" session.
-- **Full Lifecycle Management**: Create, rename, and delete sessions with automatic cleanup of associated vectors and files.
+### Retrieval and Generation Modes
+- `qa`: grounded answer generation with chunk-level citations
+- `compare`: cross-paper structured comparison with claims and per-paper stances
+- `lit_review`: structured multi-source literature review generation
+- `monitoring` (frontend view): aggregated metrics from run logs
 
-### Multi-Source Document Ingestion
-- **Local Uploads**: Process scientific PDFs with semantic chunking and metadata enrichment.
-- **External Integration**: Search and import papers directly into your session from:
-  - **arXiv** (General Science)
-  - **PubMed** (Life Sciences & Bio-medical)
-  - **Semantic Scholar** (Cross-disciplinary)
-  - **ACL Anthology** (Computational Linguistics & NLP)
-  - **medRxiv** (Health Sciences)
-- **Background Processing**: Real-time status tracking (Uploaded â†’ Processing â†’ Indexed).
+### Retrieval Stack
+- Vector retrieval (Chroma similarity)
+- Optional BM25 lexical retrieval (`rank-bm25`)
+- Reciprocal Rank Fusion for hybrid merge
+- Optional LLM query expansion (multi-query)
+- Lightweight reranking using keyword overlap
+- Session/document source filtering
 
-### Advanced RAG Modes
-- **QA Mode**: Traditional question answering with strict groundingâ€”model refuses to answer if evidence is missing in the retrieved context.
-- **Compare Mode**: Automated cross-paper analysis identifying claims and stances across multiple documents.
-- **Literature Review**: High-level synthesis of selected papers to generate cohesive research summaries.
-- **Strict Citations**: Every answer includes page-level citations linked to the source PDF.
+### Citation and Evidence UX
+- Citation payload includes: `source`, `page`, `chunk_id`, `snippet`, `score`
+- Frontend opens PDF.js viewer anchored to citation page and search phrase
+- Highlight creation from citation snippets
+- Highlight semantic search + lexical fallback
 
-### Monitoring & Performance
-- **Metrics Dashboard**: Track query latency, ingestion times, and retrieval accuracy.
-- **Run Logs**: Detailed audit of every LLM interaction and retrieval step.
+### External Discovery/Import
+Unified external search/import endpoints support:
+- arXiv
+- PubMed
+- Semantic Scholar
+- ACL (via Semantic Scholar filtering)
+- medRxiv (via Semantic Scholar filtering)
 
----
+Provider calls are guarded by retry + exponential backoff + per-provider circuit breaker.
 
-## Tech Stack
+## Repository Layout
 
-- **Backend**: Django 6.0+, Django REST Framework (DRF)
-- **LLM Engine**: Ollama (Mistral 7B)
-- **Embeddings**: Nomic-Embed-Text
-- **Vector DB**: ChromaDB
-- **Frontend**: React.js with a modern Dark/Light mode interface
-- **Task Handling**: Threaded background ingestion
+```text
+.
++-- backend/
+¦   +-- config/                  # Django settings + URL root
+¦   +-- rag/                     # RAG app (models, views, services, tests)
+¦   +-- requirements.txt
+¦   +-- Dockerfile
++-- frontend/
+¦   +-- src/App.js               # Main app UI and client orchestration
+¦   +-- src/api.js               # Frontend API client
+¦   +-- src/App.css              # UI theme + layout styles
+¦   +-- Dockerfile
++-- docker-compose.yml
++-- README.md
++-- TECHNICAL_DOCUMENTATION.md
+```
 
----
+## Backend API (Current)
 
-## Setup Instructions
+Base prefix: `/api/`
 
-### 1. Prerequisites
-- **Python 3.10+**
-- **Node.js & npm**
-- **Ollama** installed and running
+- `POST /ask/`
+- `POST /upload/`
+- `GET /pdfs/`
+- `DELETE /delete/`
+- `GET /history/`
+- `POST /session/`
+- `GET /sessions/`
+- `DELETE /session/<session_name>/`
+- `GET /metrics/summary/`
+- `GET /documents/<id>/status/`
+- `GET /documents/<id>/page-text/?page=<1-indexed>`
+- `POST /documents/<id>/retry/`
+- `GET|POST /highlights/`
+- `DELETE /highlights/<highlight_id>/`
+- `GET /highlights/search/`
+- `GET /search/external/`
+- `POST /import/external/`
+- Legacy arXiv-only routes still present:
+  - `GET /arxiv/search/`
+  - `POST /arxiv/import/`
 
-### 2. Prepare Models
+## Data Model (Django)
+
+Main tables:
+- `Session`
+- `Document` (status lifecycle + extracted metadata)
+- `PaperSource` (external metadata and linkage)
+- `Question`
+- `Answer` (citations + optional metadata)
+- `RunLog` (latency, mode, grounding, errors)
+- `Highlight`
+- `HighlightEmbedding`
+
+## Runtime Dependencies
+
+- Python: 3.11 (Dockerfile), project requirement `3.10+`
+- Django: `>=5,<7` (currently generated from Django 6.0.1 project template)
+- DRF, CORS headers
+- LangChain ecosystem + Chroma
+- Ollama local models (default: `mistral`, `nomic-embed-text`)
+- React 19 frontend (`react-scripts`)
+
+## Local Setup (Without Docker)
+
+### 1) Start Ollama and pull models
 ```bash
 ollama pull mistral
 ollama pull nomic-embed-text
 ```
 
-### 3. Backend Setup
+### 2) Backend
 ```bash
 cd backend
 python -m venv venv
-# Windows:
-.\venv\Scripts\activate
-# Linux/Mac:
-source venv/bin/activate
-
+source venv/bin/activate  # Windows: .\\venv\\Scripts\\activate
 pip install -r requirements.txt
+cp .env.example .env      # Windows: copy .env.example .env
 python manage.py migrate
 python manage.py runserver
 ```
-*Backend runs at `http://127.0.0.1:8000`*
 
-### 4. Frontend Setup
+Backend runs on `http://127.0.0.1:8000`
+
+### 3) Frontend
 ```bash
 cd frontend
 npm install
 npm start
 ```
-*Frontend runs at `http://localhost:3000`*
 
----
+Frontend runs on `http://localhost:3000`
 
-## Architecture Overview
+Optional frontend API override:
+- `REACT_APP_API_BASE_URL=http://127.0.0.1:8000`
 
-```mermaid
-graph TD
-    UI[React Frontend] -->|API Requests| Django[Django REST API]
-    Django -->|Models| SQLite[(Relational DB)]
-    Django -->|Chunks| Chroma[(Chroma Vector Store)]
-    Django -->|Prompts| Ollama(Mistral / Nomic Embed)
-    Chroma -->|Context| Retriever[Retriever]
-    Retriever -->|Grounded Answer| UI
+## Docker Setup
+
+```bash
+docker compose up --build
 ```
 
----
+Services:
+- `postgres` (15)
+- `ollama`
+- `backend` (`:8000`)
+- `frontend` (`:3000`)
 
-## Important Notes
-- **Hardware Acceleration**: GPU acceleration for Ollama is highly recommended for viable latencies.
-- **Hallucination Control**: The system is intentionally conservative. If it cannot find a definitive answer in the provided sources, it will state so rather than hallucinating metadata or content.
-- **Environment**: This project is optimized for Windows (WSL) and Linux environments.
+Optional GPU pass-through (compose override exists):
+- `docker-compose.gpu.yml` sets `gpus: all` for Ollama service
 
----
+## Environment Variables (Backend)
 
-## Reliability Toolkit (Implemented)
+Key variables from `backend/.env.example`:
+- Django: `SECRET_KEY`, `DEBUG`, `ALLOWED_HOSTS`
+- DB: `DB_ENGINE`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`
+- CORS: `CORS_ALLOW_ALL`
+- Ollama: `OLLAMA_BASE_URL`, `OLLAMA_KEEP_ALIVE`, `OLLAMA_NUM_PARALLEL`, `OLLAMA_MAX_LOADED_MODELS`
+- Chroma: `CHROMA_PERSIST_DIR`
+- Retrieval/LLM knobs: `RAG_QA_*`, `RAG_LLM_*`
+- Resilience: `EXTERNAL_API_RETRIES`, `EXTERNAL_API_RETRY_BACKOFF_SECONDS`, `EXTERNAL_API_CIRCUIT_FAILURE_THRESHOLD`, `EXTERNAL_API_CIRCUIT_OPEN_SECONDS`
 
-### 1. Automated Tests
-The backend now includes:
-- **Unit tests** for citation serialization/deduplication and resilience behavior.
-- **API flow tests** for upload/list, ask-with-citations, highlight create/search.
-- **Regression tests** for page-text alignment (1-indexed page mapping used by citation click/highlight behavior).
+## Current Behavior Notes
 
-Run all backend tests:
+- Ingestion runs in background Python threads from API handlers.
+- `Document.status` transitions: `UPLOADED -> PROCESSING -> INDEXED` or `FAILED`.
+- Some imported sources ingest metadata-only (summary mode) when full PDF is unavailable.
+- Citation pages are currently stored zero-indexed in chunk metadata; frontend displays as one-indexed.
+- Session deletion removes session Chroma directory and attempts PDF cleanup when files are no longer referenced.
+
+## Testing
+
+Backend includes regression and flow tests under `backend/rag/`.
+
+Run:
 ```bash
 cd backend
-source venv/bin/activate
 python manage.py test rag -v 2
 ```
 
-Run specific suites:
-```bash
-python manage.py test rag.test_citations_and_alignment -v 2
-python manage.py test rag.test_api_flows -v 2
-python manage.py test rag.test_resilience -v 2
-```
+Notable suites:
+- `rag.test_api_flows`
+- `rag.test_citations_and_alignment`
+- `rag.test_resilience`
 
-### 2. External Provider Resilience
-External connectors now use:
-- **Retry with exponential backoff**
-- **Per-provider circuit breaker** (in-memory)
-- **Request timeouts** for HTTP-based calls
+## Known Gaps / Practical Caveats
 
-Providers covered:
-- arXiv
-- PubMed
-- Semantic Scholar (including ACL/medRxiv paths via Semantic Scholar service inheritance)
+- Background thread ingestion is process-local (no distributed task queue yet).
+- External provider rate limits and incomplete metadata vary by source.
+- PubMed path currently imports primarily in metadata-summary mode.
+- Some legacy helper scripts (`backend/test_query.py`, `backend/test_ingest.py`) are outdated relative to current function signatures.
 
-Configure in `backend/.env`:
-```env
-EXTERNAL_API_RETRIES=3
-EXTERNAL_API_RETRY_BACKOFF_SECONDS=1.0
-EXTERNAL_API_CIRCUIT_FAILURE_THRESHOLD=5
-EXTERNAL_API_CIRCUIT_OPEN_SECONDS=60
-```
+## License
+
+No explicit license file is currently present in the repository.
