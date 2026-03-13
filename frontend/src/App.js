@@ -2,6 +2,45 @@ import { useState, useEffect, useRef } from "react";
 import "./App.css";
 import { api, API_BASE } from "./api";
 
+function IconFolder() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H10l2 2h6.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function IconSun() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M12 2.5v2.2M12 19.3v2.2M4.9 4.9l1.5 1.5M17.6 17.6l1.5 1.5M2.5 12h2.2M19.3 12h2.2M4.9 19.1l1.5-1.5M17.6 6.4l1.5-1.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function IconMoon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M16.8 14.8A7 7 0 0 1 9.2 5.7a8 8 0 1 0 9.1 9.1 6.3 6.3 0 0 1-1.5 0Z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function IconChevron({ direction = "right" }) {
+  const rotation = {
+    right: "0deg",
+    left: "180deg",
+    down: "90deg",
+  }[direction];
+
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" style={{ transform: `rotate(${rotation})` }}>
+      <path d="m9 6 6 6-6 6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 function App() {
   const [session, setSession] = useState("Research Session");
   const [sessions, setSessions] = useState([]);
@@ -177,10 +216,17 @@ function App() {
     const docUrl = `${API_BASE}/media/pdfs/${encodeURIComponent(filename)}`;
 
     let precisePhrase = "";
+    let textPreview = "";
+    let contentType = "pdf";
     const doc = pdfs.find((p) => p.filename === filename);
+    const isSummaryOnly = Boolean(doc?.error_message?.includes("Summary-only"));
+    const isPdfFilename = filename?.toLowerCase().endsWith(".pdf");
+
     if (doc) {
       try {
         const payload = await api.getDocumentPageText(doc.id, page);
+        textPreview = payload?.text || "";
+        contentType = payload?.content_type || "pdf";
         precisePhrase = choosePrecisePhrase(snippet, payload?.text || "");
       } catch (err) {
         console.error("Failed fetching page text for precise highlight", err);
@@ -189,13 +235,18 @@ function App() {
 
     const searchQuery = precisePhrase || chooseFallbackSearch(snippet);
     const usePhraseMatch = Boolean(precisePhrase);
-    const viewerUrl = `https://mozilla.github.io/pdf.js/web/viewer.html?file=${encodeURIComponent(docUrl)}#page=${page}${searchQuery ? `&search=${encodeURIComponent(searchQuery)}${usePhraseMatch ? "&phrase=true" : ""}` : ""}`;
+    const shouldUsePdfViewer = isPdfFilename && !isSummaryOnly && contentType === "pdf";
+    const viewerUrl = shouldUsePdfViewer
+      ? `https://mozilla.github.io/pdf.js/web/viewer.html?file=${encodeURIComponent(docUrl)}#page=${page}${searchQuery ? `&search=${encodeURIComponent(searchQuery)}${usePhraseMatch ? "&phrase=true" : ""}` : ""}`
+      : "";
 
     setPdfViewer({
       filename,
       page,
       snippet,
       viewerUrl,
+      textPreview,
+      mode: shouldUsePdfViewer ? "pdf" : "text",
       precisePhrase,
     });
     setIsPdfDrawerFullscreen(false);
@@ -484,8 +535,9 @@ function App() {
               className="theme-toggle"
               onClick={toggleTheme}
               title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+              aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
             >
-              {theme === "dark" ? "Light" : "Dark"}
+              {theme === "dark" ? <IconSun /> : <IconMoon />}
             </button>
           </div>
         </div>
@@ -506,7 +558,9 @@ function App() {
                   onClick={() => setSession(s.name)}
                 >
                   <div className="session-content">
-                    <span className="session-item-icon">Dir</span>
+                    <span className="session-item-icon" aria-hidden="true">
+                      <IconFolder />
+                    </span>
                     {s.name}
                   </div>
                   <button
@@ -588,7 +642,7 @@ function App() {
                           <p className="arxiv-meta"><strong>Date:</strong> {res.date || "n/a"}</p>
                           <div className="arxiv-abstract-container">
                             <strong>Abstract:</strong>
-                            <p className="arxiv-abstract">{res.abstract}</p>
+                            <p className="arxiv-abstract">{res.abstract || "No abstract available."}</p>
                           </div>
                           <div className="arxiv-actions">
                             <a
@@ -699,16 +753,18 @@ function App() {
         </div>
       </aside>}
 
+      <button
+        className={`sidebar-edge-toggle ${isSidebarVisible ? "visible" : "hidden"}`}
+        onClick={() => setIsSidebarVisible((v) => !v)}
+        title={isSidebarVisible ? "Hide sidebar" : "Show sidebar"}
+        aria-label={isSidebarVisible ? "Hide sidebar" : "Show sidebar"}
+      >
+        <IconChevron direction={isSidebarVisible ? "left" : "right"} />
+      </button>
+
       {/* Main Content */}
       <main className="main-content">
         <div className="mode-selector">
-          <button
-            className="sidebar-toggle-btn"
-            onClick={() => setIsSidebarVisible((v) => !v)}
-            title={isSidebarVisible ? "Hide sidebar" : "Show sidebar"}
-          >
-            {isSidebarVisible ? "Hide Panel" : "Show Panel"}
-          </button>
           {['qa', 'compare', 'lit_review', 'monitoring'].map(m => (
             <button
               key={m}
@@ -909,11 +965,23 @@ function App() {
               </div>
             </div>
 
-            <iframe
-              title="PDF.js Viewer"
-              className="pdf-frame"
-              src={pdfViewer.viewerUrl}
-            />
+            {pdfViewer.mode === "pdf" ? (
+              <iframe
+                title="PDF.js Viewer"
+                className="pdf-frame"
+                src={pdfViewer.viewerUrl}
+              />
+            ) : (
+              <div className="text-preview-panel">
+                <div className="text-preview-header">
+                  <strong>Text Preview</strong>
+                  <span className="muted">Metadata-only source</span>
+                </div>
+                <pre className="text-preview-content">
+                  {pdfViewer.textPreview || pdfViewer.snippet || "No preview text available."}
+                </pre>
+              </div>
+            )}
 
             <div className="drawer-section">
               <h4>Citation Snippet</h4>

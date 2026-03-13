@@ -1,6 +1,7 @@
 import logging
 import requests
-from typing import List, Dict, Optional
+from datetime import datetime
+from typing import List, Dict
 
 from rag.services.resilience import (
     call_with_resilience,
@@ -14,6 +15,13 @@ class SemanticScholarService:
     """Service for interacting with Semantic Scholar API."""
 
     BASE_URL = "https://api.semanticscholar.org/graph/v1"
+
+    @staticmethod
+    def _safe_text(value, default: str = "") -> str:
+        """Normalize provider strings because Semantic Scholar often returns explicit nulls."""
+        if value is None:
+            return default
+        return str(value).strip()
 
     def _safe_request(self, url: str, params: Dict) -> Dict:
         """Semantic Scholar request with retry and circuit breaker."""
@@ -93,7 +101,7 @@ class SemanticScholarService:
                 session=session,
                 defaults={
                     'title': metadata['title'],
-                    'abstract': metadata['abstract']
+                    'abstract': metadata['abstract'],
                 }
             )
             
@@ -102,18 +110,33 @@ class SemanticScholarService:
                 document.abstract = metadata['abstract']
                 document.save()
             
-            # Use provided source_type
-            PaperSource.objects.get_or_create(
+            published_date = None
+            year_text = self._safe_text(metadata.get("published_date"))
+            if year_text and year_text.isdigit():
+                published_date = datetime(int(year_text), 1, 1).date()
+
+            paper_source, paper_source_created = PaperSource.objects.get_or_create(
                 source_type=source_type,
                 external_id=paper_id,
                 defaults={
                     'title': metadata['title'],
                     'authors': ", ".join(metadata['authors']),
                     'abstract': metadata['abstract'],
+                    'published_date': published_date,
                     'pdf_url': pdf_url or "",
+                    'entry_url': metadata.get("entry_url", ""),
                     'document': document
                 }
             )
+            if not paper_source_created:
+                paper_source.title = metadata["title"]
+                paper_source.authors = ", ".join(metadata["authors"])
+                paper_source.abstract = metadata["abstract"]
+                paper_source.published_date = published_date
+                paper_source.pdf_url = pdf_url or ""
+                paper_source.entry_url = metadata.get("entry_url", "")
+                paper_source.document = document
+                paper_source.save()
 
 
             def background_import(doc_id, url, meta):
@@ -145,6 +168,10 @@ class SemanticScholarService:
                             meta['abstract'], 
                             ", ".join(meta['authors'])
                         )
+                    PaperSource.objects.filter(source_type=source_type, external_id=paper_id).update(
+                        document_id=doc_id,
+                        imported=True,
+                    )
                 except Exception as e:
                     logger.error(f"Scholar import failed: {e}")
                     # If PDF failed, try abstract fallback as last resort
@@ -155,7 +182,11 @@ class SemanticScholarService:
                             meta['abstract'], 
                             ", ".join(meta['authors'])
                         )
-                    except:
+                        PaperSource.objects.filter(source_type=source_type, external_id=paper_id).update(
+                            document_id=doc_id,
+                            imported=True,
+                        )
+                    except Exception:
                         doc = Document.objects.get(id=doc_id)
                         doc.status = 'FAILED'
                         doc.error_message = str(e)
@@ -170,17 +201,21 @@ class SemanticScholarService:
 
     def _extract_metadata(self, paper: Dict) -> Dict:
         """Unified dictionary structure."""
-        authors = [a.get("name") for a in paper.get("authors", [])]
+        authors = [
+            self._safe_text(a.get("name"))
+            for a in paper.get("authors", [])
+            if self._safe_text(a.get("name"))
+        ]
         pdf_info = paper.get("openAccessPdf")
         pdf_url = pdf_info.get("url") if pdf_info else None
         
         return {
-            "external_id": paper.get("paperId", ""),
-            "title": paper.get("title", "No Title"),
+            "external_id": self._safe_text(paper.get("paperId")),
+            "title": self._safe_text(paper.get("title"), "No Title"),
             "authors": authors,
-            "abstract": paper.get("abstract", "No abstract available."),
-            "published_date": str(paper.get("year", "N/A")),
-            "entry_url": paper.get("url", ""),
+            "abstract": self._safe_text(paper.get("abstract"), "No abstract available."),
+            "published_date": self._safe_text(paper.get("year"), ""),
+            "entry_url": self._safe_text(paper.get("url")),
             "pdf_url": pdf_url,
             "source_type": "semanticscholar"
         }

@@ -134,8 +134,12 @@ class IngestionService:
         Used when the full PDF is not publicly available.
         """
         from langchain_core.documents import Document as LangchainDocument
+        document = None
         try:
             document = Document.objects.get(id=document_id)
+            title = title or "Untitled paper"
+            abstract = abstract or "No abstract available."
+            authors = authors or "Unknown authors"
             document.status = 'PROCESSING'
             document.processing_started_at = timezone.now()
             document.save(update_fields=['status', 'processing_started_at'])
@@ -181,7 +185,8 @@ class IngestionService:
 
         except Exception as e:
             logger.error(f"Virtual ingestion failed: {e}")
-            document.status = 'FAILED'
-            document.error_message = str(e)
-            document.save(update_fields=['status', 'error_message'])
+            if document is not None:
+                document.status = 'FAILED'
+                document.error_message = str(e)
+                document.save(update_fields=['status', 'error_message'])
             return {"status": "error", "message": str(e)}

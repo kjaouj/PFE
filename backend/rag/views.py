@@ -66,7 +66,8 @@ def document_status(request, document_id):
 @api_view(["GET"])
 def document_page_text(request, document_id):
     """
-    Return extracted text for a specific PDF page.
+    Return extracted text for a specific document page.
+    Falls back to metadata-only content for virtual/non-PDF imports.
     Query param:
       - page (1-indexed)
     """
@@ -92,33 +93,69 @@ def document_page_text(request, document_id):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    try:
-        from pypdf import PdfReader
+    file_path = f"pdfs/{document.filename}"
+    looks_like_pdf = document.filename.lower().endswith(".pdf")
 
-        file_path = default_storage.path(f"pdfs/{document.filename}")
-        reader = PdfReader(file_path)
+    if looks_like_pdf and default_storage.exists(file_path):
+        try:
+            from pypdf import PdfReader
 
-        if page > len(reader.pages):
+            reader = PdfReader(default_storage.path(file_path))
+
+            if page > len(reader.pages):
+                return Response(
+                    {"error": "Page out of range"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            text = (reader.pages[page - 1].extract_text() or "").strip()
             return Response(
-                {"error": "Page out of range"},
-                status=status.HTTP_400_BAD_REQUEST,
+                {
+                    "document_id": document.id,
+                    "filename": document.filename,
+                    "page": page,
+                    "text": text,
+                    "content_type": "pdf",
+                },
+                status=status.HTTP_200_OK,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"PDF text extraction failed for document {document.id} ({document.filename}): {exc}"
             )
 
-        text = (reader.pages[page - 1].extract_text() or "").strip()
+    if page > 1:
         return Response(
-            {
-                "document_id": document.id,
-                "filename": document.filename,
-                "page": page,
-                "text": text,
-            },
-            status=status.HTTP_200_OK,
+            {"error": "Page out of range"},
+            status=status.HTTP_400_BAD_REQUEST,
         )
-    except Exception as exc:
-        return Response(
-            {"error": str(exc)},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
+
+    paper_source = getattr(document, "paper_source", None)
+    title = (paper_source.title if paper_source else None) or document.title or document.filename
+    authors = (paper_source.authors if paper_source else None) or ""
+    abstract = (paper_source.abstract if paper_source else None) or document.abstract or ""
+    entry_url = (paper_source.entry_url if paper_source else None) or ""
+    source_type = (paper_source.source_type if paper_source else None) or "manual"
+
+    content_parts = [f"TITLE: {title}"]
+    if authors:
+        content_parts.append(f"AUTHORS: {authors}")
+    if abstract:
+        content_parts.append(f"\nABSTRACT:\n{abstract}")
+    if entry_url:
+        content_parts.append(f"\nSOURCE URL:\n{entry_url}")
+
+    return Response(
+        {
+            "document_id": document.id,
+            "filename": document.filename,
+            "page": page,
+            "text": "\n".join(content_parts).strip(),
+            "content_type": "text",
+            "source_type": source_type,
+        },
+        status=status.HTTP_200_OK,
+    )
 
 
 @api_view(["POST"])

@@ -11,6 +11,7 @@ from .services.pubmed_service import PubmedService
 from .services.semanticscholar_service import SemanticScholarService
 from .services.acl_service import ACLService
 from .services.medrxiv_service import MedRxivService
+from .services.resilience import CircuitOpenError, TransientExternalError
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,12 @@ def external_search(request):
             'results': unified_results
         })
 
+    except TransientExternalError as e:
+        logger.warning(f"Transient search failure for {provider}: {e}")
+        return Response({'error': str(e)}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+    except CircuitOpenError as e:
+        logger.warning(f"Circuit open for {provider}: {e}")
+        return Response({'error': str(e)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
     except Exception as e:
         logger.error(f"Search failed for {provider}: {e}")
         return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -119,6 +126,12 @@ def external_import(request):
 
         return Response(result, status=status.HTTP_202_ACCEPTED)
 
+    except TransientExternalError as e:
+        logger.warning(f"Transient import failure for {provider}: {e}")
+        return Response({'error': str(e)}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+    except CircuitOpenError as e:
+        logger.warning(f"Circuit open for {provider}: {e}")
+        return Response({'error': str(e)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
     except Exception as e:
         logger.error(f"Import failed for {provider}: {e}")
         return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
