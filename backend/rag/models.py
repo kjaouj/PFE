@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.db import models
 
 
@@ -11,6 +12,7 @@ class Session(models.Model):
 
 class Document(models.Model):
     STATUS_CHOICES = [
+        ('QUEUED', 'Queued'),
         ('UPLOADED', 'Uploaded'),
         ('PROCESSING', 'Processing'),
         ('INDEXED', 'Indexed'),
@@ -18,6 +20,7 @@ class Document(models.Model):
     ]
 
     filename = models.CharField(max_length=255)
+    storage_path = models.CharField(max_length=500, null=True, blank=True)
     session = models.ForeignKey(
         Session,
         on_delete=models.CASCADE,
@@ -38,6 +41,14 @@ class Document(models.Model):
 
     class Meta:
         unique_together = ("filename", "session")
+
+    @property
+    def resolved_storage_path(self):
+        return self.storage_path or f"pdfs/{self.filename}"
+
+    @property
+    def file_url(self):
+        return f"{settings.MEDIA_URL}{self.resolved_storage_path}"
 
     def __str__(self):
         return f"{self.filename} ({self.session.name}) - {self.status}"
@@ -105,6 +116,68 @@ class PaperSource(models.Model):
     def __str__(self):
         status = "✓ Imported" if self.imported else "⊗ Not imported"
         return f"[{self.source_type.upper()}] {self.title[:50]}... {status}"
+
+
+class IngestionJob(models.Model):
+    STATUS_CHOICES = [
+        ("QUEUED", "Queued"),
+        ("RUNNING", "Running"),
+        ("SUCCEEDED", "Succeeded"),
+        ("FAILED", "Failed"),
+    ]
+
+    JOB_TYPE_CHOICES = [
+        ("DOCUMENT_INGEST", "Document Ingest"),
+        ("ARXIV_IMPORT", "arXiv Import"),
+        ("PUBMED_IMPORT", "PubMed Import"),
+        ("SEMANTIC_SCHOLAR_IMPORT", "Semantic Scholar Import"),
+    ]
+
+    job_type = models.CharField(max_length=40, choices=JOB_TYPE_CHOICES)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="QUEUED")
+    payload = models.JSONField(default=dict, blank=True)
+    document = models.ForeignKey(
+        Document,
+        on_delete=models.CASCADE,
+        related_name="ingestion_jobs",
+        null=True,
+        blank=True,
+    )
+    paper_source = models.ForeignKey(
+        PaperSource,
+        on_delete=models.CASCADE,
+        related_name="ingestion_jobs",
+        null=True,
+        blank=True,
+    )
+    session = models.ForeignKey(
+        Session,
+        on_delete=models.CASCADE,
+        related_name="ingestion_jobs",
+        null=True,
+        blank=True,
+    )
+    attempts = models.PositiveIntegerField(default=0)
+    max_attempts = models.PositiveIntegerField(default=3)
+    available_at = models.DateTimeField(auto_now_add=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    worker_id = models.CharField(max_length=255, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(fields=["status", "available_at"]),
+            models.Index(fields=["job_type", "status"]),
+            models.Index(fields=["document", "status"]),
+        ]
+
+    def __str__(self):
+        target = self.document_id or self.paper_source_id or "n/a"
+        return f"{self.job_type}#{self.id} [{self.status}] target={target}"
 
 
 class Question(models.Model):

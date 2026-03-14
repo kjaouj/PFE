@@ -43,6 +43,16 @@ class CitationRegressionTests(TestCase):
         self.assertEqual(citation["snippet"], "A" * 200)
         self.assertEqual(citation["score"], 0.7777)
 
+    def test_to_citation_dict_strips_embedded_nul_bytes(self):
+        doc = LangchainDocument(
+            page_content="Lc[W](t) :=\nX\n\n\x00control",
+            metadata={"source": "source.pdf", "page": 7},
+        )
+
+        citation = ScoredDocument(doc, score=0.5, chunk_id="cid-null").to_citation_dict()
+
+        self.assertNotIn("\x00", citation["snippet"])
+
 
 class PageAlignmentApiRegressionTests(TestCase):
     def setUp(self):
@@ -50,13 +60,15 @@ class PageAlignmentApiRegressionTests(TestCase):
         self.session = Session.objects.create(name="alignment-session")
         self.document = Document.objects.create(
             filename="alignment.pdf",
+            storage_path="pdfs/alignment_abcd123.pdf",
             session=self.session,
             status="INDEXED",
         )
 
+    @patch("rag.views.default_storage.exists")
     @patch("rag.views.default_storage.path")
     @patch("pypdf.PdfReader")
-    def test_document_page_text_is_one_indexed(self, mock_reader_cls, mock_storage_path):
+    def test_document_page_text_is_one_indexed(self, mock_reader_cls, mock_storage_path, mock_storage_exists):
         class _FakePage:
             def __init__(self, text):
                 self._text = text
@@ -68,6 +80,7 @@ class PageAlignmentApiRegressionTests(TestCase):
             def __init__(self, _path):
                 self.pages = [_FakePage("page-one"), _FakePage("page-two")]
 
+        mock_storage_exists.return_value = True
         mock_storage_path.return_value = "/tmp/alignment.pdf"
         mock_reader_cls.side_effect = _FakeReader
 
@@ -78,4 +91,5 @@ class PageAlignmentApiRegressionTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["page"], 1)
         self.assertEqual(response.data["text"], "page-one")
-
+        mock_storage_exists.assert_called_once_with("pdfs/alignment_abcd123.pdf")
+        mock_storage_path.assert_called_once_with("pdfs/alignment_abcd123.pdf")

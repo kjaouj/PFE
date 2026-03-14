@@ -19,6 +19,7 @@ from langchain_core.documents import Document as LangchainDocument
 from rank_bm25 import BM25Okapi
 
 from rag.utils import get_session_path
+from rag.utils import sanitize_text
 from rag.services.ollama_client import create_embeddings, create_llm
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,7 @@ class ScoredDocument:
     @property
     def snippet(self) -> str:
         """First ~200 characters of the chunk content."""
-        return self.document.page_content[:200].strip()
+        return sanitize_text(self.document.page_content[:200]).strip()
 
     @property
     def metadata(self) -> dict:
@@ -57,7 +58,7 @@ class ScoredDocument:
 
     @property
     def page_content(self) -> str:
-        return self.document.page_content
+        return sanitize_text(self.document.page_content)
 
     def to_citation_dict(self) -> dict:
         """Serialise into the snippet-level citation format returned by the API."""

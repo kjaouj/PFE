@@ -2,6 +2,29 @@ import { useState, useEffect, useRef } from "react";
 import "./App.css";
 import { api, API_BASE } from "./api";
 
+const MODE_CONFIG = {
+  qa: {
+    label: "QA",
+    description: "Best for precise answers grounded in one or more selected papers.",
+    minSources: 1,
+  },
+  compare: {
+    label: "Compare",
+    description: "Use when you want explicit agreements and disagreements across papers.",
+    minSources: 2,
+  },
+  lit_review: {
+    label: "Lit Review",
+    description: "Use for a structured cross-paper synthesis of themes, differences, and open problems.",
+    minSources: 2,
+  },
+  monitoring: {
+    label: "Monitoring",
+    description: "Inspect system performance and retrieval quality metrics.",
+    minSources: 0,
+  },
+};
+
 function IconFolder() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -68,6 +91,8 @@ function App() {
   const [externalError, setExternalError] = useState("");
   const fileInputRef = useRef(null);
   const chatEndRef = useRef(null);
+  const distinctSelectedCount = new Set(selectedPdfs).size;
+  const activeModeConfig = MODE_CONFIG[mode];
 
   const externalSources = [
     { id: "arxiv", label: "arXiv", hint: "Computer science, physics and math preprints" },
@@ -213,12 +238,12 @@ function App() {
       ? Number(citation.page || 1)
       : Number(citation.page || 0) + 1;
     const snippet = (citation.snippet || "").trim();
-    const docUrl = `${API_BASE}/media/pdfs/${encodeURIComponent(filename)}`;
 
     let precisePhrase = "";
     let textPreview = "";
     let contentType = "pdf";
     const doc = pdfs.find((p) => p.filename === filename);
+    const docUrl = doc?.file_url ? `${API_BASE}${doc.file_url}` : `${API_BASE}/media/pdfs/${encodeURIComponent(filename)}`;
     const isSummaryOnly = Boolean(doc?.error_message?.includes("Summary-only"));
     const isPdfFilename = filename?.toLowerCase().endsWith(".pdf");
 
@@ -438,6 +463,14 @@ function App() {
   const askQuestion = async (e) => {
     e?.preventDefault();
     if (!question.trim() || loading) return;
+    if (mode !== "monitoring" && distinctSelectedCount < activeModeConfig.minSources) {
+      setStatus(
+        mode === "lit_review"
+          ? "Literature Review needs at least 2 selected papers. Use QA for a single-paper summary."
+          : `Select at least ${activeModeConfig.minSources} papers for ${activeModeConfig.label}.`
+      );
+      return;
+    }
 
     const userMsg = { role: "user", text: `${mode === 'qa' ? '' : '[' + mode.toUpperCase() + '] '}${question}` };
     setMessages(prev => [...prev, userMsg]);
@@ -464,7 +497,8 @@ function App() {
         setMessages(prev => [...prev, {
           role: "assistant",
           text: data.content,
-          title: data.title || "Literature Review"
+          title: data.title || "Literature Review",
+          citations: data.citations || [],
         }]);
       } else {
         setMessages(prev => [...prev, {
@@ -771,7 +805,7 @@ function App() {
               className={`mode-btn ${mode === m ? 'active' : ''}`}
               onClick={() => setMode(m)}
             >
-              {m.toUpperCase().replace('_', ' ')}
+              {MODE_CONFIG[m].label}
             </button>
           ))}
         </div>
@@ -780,8 +814,16 @@ function App() {
           <span className="summary-chip"><strong>Session:</strong> {session || "None"}</span>
           <span className="summary-chip"><strong>Selected Sources:</strong> {selectedPdfs.length}</span>
           <span className="summary-chip"><strong>Total Sources:</strong> {pdfs.length}</span>
-          {mode !== "monitoring" && <span className="summary-chip"><strong>Mode:</strong> {mode.replace("_", " ").toUpperCase()}</span>}
+          {mode !== "monitoring" && <span className="summary-chip"><strong>Mode:</strong> {activeModeConfig.label}</span>}
         </div>
+        {mode !== "monitoring" && (
+          <div className="status-indicator" style={{ marginTop: "10px" }}>
+            <strong>{activeModeConfig.label}:</strong> {activeModeConfig.description}
+            {activeModeConfig.minSources > 1 && (
+              <span> Select at least {activeModeConfig.minSources} papers.</span>
+            )}
+          </div>
+        )}
 
         {mode !== "monitoring" && (
           <div className="global-highlight-search">
@@ -1072,7 +1114,15 @@ function App() {
             <form onSubmit={askQuestion} className="chat-input-wrapper">
               <input
                 type="text"
-                placeholder={selectedPdfs.length > 0 ? `Ask a question in ${mode.replace('_', ' ').toUpperCase()} mode...` : "Select a source to start asking questions"}
+                placeholder={
+                  distinctSelectedCount >= activeModeConfig.minSources
+                    ? `Ask a question in ${activeModeConfig.label} mode...`
+                    : mode === "lit_review"
+                      ? "Select at least 2 papers for a literature review"
+                      : mode === "compare"
+                        ? "Select at least 2 papers to compare"
+                        : "Select a source to start asking questions"
+                }
                 value={question}
                 onChange={(e) => setQuestion(e.target.value)}
                 disabled={loading}
@@ -1080,7 +1130,7 @@ function App() {
               <button
                 type="submit"
                 className="btn-icon"
-                disabled={loading || !question.trim()}
+                disabled={loading || !question.trim() || distinctSelectedCount < activeModeConfig.minSources}
               >
                 Send
               </button>

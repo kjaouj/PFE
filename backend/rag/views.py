@@ -1,6 +1,5 @@
 import time
 import logging
-import threading
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -13,17 +12,27 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
 
-from .models import Session, Document, Question, Answer, RunLog, PaperSource
-from .utils import get_default_session, normalize_filename
+from .models import Session, Document, Question, Answer, RunLog, PaperSource, IngestionJob
+from .utils import get_default_session, normalize_filename, sanitize_json_value, sanitize_text
 from .query import ask_with_citations, retrieve_paper_overview
-from .ingest import ingest_pdf
 
-from .services.ingestion import IngestionService
+from .services.job_queue import enqueue_job
 from .services.metrics import MetricsService
 from .services.synthesis import SynthesisService
 from .services.retrieval import RetrievalService
 
 from .router import is_title_question, is_about_paper_question, is_page_count_question
+
+
+def _documents_using_storage_path(storage_path: str, exclude_document_id: int | None = None):
+    if not storage_path:
+        return Document.objects.none()
+
+    queryset = Document.objects.filter(storage_path=storage_path)
+    if exclude_document_id is not None:
+        queryset = queryset.exclude(id=exclude_document_id)
+    return queryset
+
 
 @api_view(["GET"])
 def document_status(request, document_id):
@@ -93,7 +102,7 @@ def document_page_text(request, document_id):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    file_path = f"pdfs/{document.filename}"
+    file_path = document.resolved_storage_path
     looks_like_pdf = document.filename.lower().endswith(".pdf")
 
     if looks_like_pdf and default_storage.exists(file_path):
@@ -177,8 +186,18 @@ def retry_document_ingestion(request, document_id):
             status=status.HTTP_409_CONFLICT,
         )
 
+    existing_job = IngestionJob.objects.filter(
+        document=document,
+        status__in=["QUEUED", "RUNNING"],
+    ).first()
+    if existing_job:
+        return Response(
+            {"error": "Document already has an active ingestion job"},
+            status=status.HTTP_409_CONFLICT,
+        )
+
     # Reset status before retry
-    document.status = "UPLOADED"
+    document.status = "QUEUED"
     document.error_message = None
     document.processing_started_at = None
     document.processing_completed_at = None
@@ -190,48 +209,18 @@ def retry_document_ingestion(request, document_id):
             "processing_completed_at",
         ]
     )
-
-    def retry_in_background(doc_id: int):
-        service = IngestionService()
-        try:
-            doc = Document.objects.get(id=doc_id)
-            file_path = Path(default_storage.path(f"pdfs/{doc.filename}"))
-
-            if file_path.exists():
-                service.ingest_document(doc.id, str(file_path))
-                return
-
-            # Metadata-only fallback for imported records without local PDF
-            paper_source = getattr(doc, "paper_source", None)
-            if paper_source and (paper_source.abstract or doc.abstract):
-                service.ingest_metadata_only(
-                    document_id=doc.id,
-                    title=(paper_source.title or doc.title or doc.filename),
-                    abstract=(paper_source.abstract or doc.abstract or ""),
-                    authors=(paper_source.authors or ""),
-                )
-                return
-
-            raise FileNotFoundError("No local PDF found and no metadata fallback available")
-        except Exception as exc:
-            logger.error(f"Retry ingestion failed for document {doc_id}: {exc}")
-            try:
-                failed_doc = Document.objects.get(id=doc_id)
-                failed_doc.status = "FAILED"
-                failed_doc.error_message = str(exc)
-                failed_doc.save(update_fields=["status", "error_message"])
-            except Exception:
-                pass
-
-    thread = threading.Thread(
-        target=retry_in_background, args=(document.id,), daemon=True
+    job, _ = enqueue_job(
+        "DOCUMENT_INGEST",
+        document=document,
+        session=document.session,
+        payload={"document_id": document.id},
     )
-    thread.start()
 
     return Response(
         {
-            "message": "Retry initiated",
+            "message": "Retry queued",
             "document_id": document.id,
+            "job_id": job.id,
             "status": document.status,
         },
         status=status.HTTP_202_ACCEPTED,
@@ -277,6 +266,15 @@ def ask_question(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    if mode == "lit_review" and len(set(sources or [])) < 2:
+        return Response(
+            {
+                "error": "Literature review mode requires at least 2 distinct selected documents.",
+                "message": "Use QA for single-paper questions, or select at least 2 papers for a cross-paper literature review.",
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
     # Resolve session
     try:
         session = (
@@ -291,7 +289,7 @@ def ask_question(request):
         )
 
     question_obj = Question.objects.create(
-        text=question_text,
+        text=sanitize_text(question_text),
         session=session
     )
 
@@ -370,9 +368,9 @@ def ask_question(request):
 
                 Answer.objects.create(
                     question=question_obj,
-                    text=result["message"],
-                    citations=retrieved_chunks,
-                    metadata=result,
+                    text=sanitize_text(result["message"]),
+                    citations=sanitize_json_value(retrieved_chunks),
+                    metadata=sanitize_json_value(result),
                 )
             else:
                 # Extract raw langchain docs for SynthesisService
@@ -395,22 +393,32 @@ def ask_question(request):
                 Answer.objects.create(
                     question=question_obj,
                     text=f"Comparison on: {question_text}",
-                    citations=retrieved_chunks,
-                    metadata=result,
+                    citations=sanitize_json_value(retrieved_chunks),
+                    metadata=sanitize_json_value(result),
                 )
 
         elif mode == "lit_review":
-            # ---- LIT REVIEW MODE — hybrid retrieval ----
+            # ---- LIT REVIEW MODE — balanced cross-paper retrieval ----
             retrieval = RetrievalService(session.name)
             retrieval_start = time.perf_counter()
-            scored_docs = retrieval.retrieve(
-                query=question_text,
-                sources=sources or None,
-                k=15,
-                use_hybrid=True,
-                use_multi_query=False,
-                use_reranking=True,
-            )
+            scored_docs = []
+            seen_chunk_ids = set()
+            for src in set(sources or []):
+                source_docs = retrieval.retrieve(
+                    query=question_text,
+                    sources=[src],
+                    k=6,
+                    use_hybrid=True,
+                    use_multi_query=False,
+                    use_reranking=True,
+                )
+                for doc in source_docs:
+                    if doc.chunk_id in seen_chunk_ids:
+                        continue
+                    seen_chunk_ids.add(doc.chunk_id)
+                    scored_docs.append(doc)
+            scored_docs.sort(key=lambda d: d.score, reverse=True)
+            scored_docs = scored_docs[:18]
             stage_timings["retrieval_ms"] = int(
                 (time.perf_counter() - retrieval_start) * 1000
             )
@@ -431,15 +439,17 @@ def ask_question(request):
             stage_timings["generation_ms"] = int(
                 (time.perf_counter() - generation_start) * 1000
             )
+            result["citations"] = retrieved_chunks
 
             Answer.objects.create(
                 question=question_obj,
-                text=result.get("content", ""),
-                citations=[],
-                metadata={
+                text=sanitize_text(result.get("content", "")),
+                citations=sanitize_json_value(retrieved_chunks),
+                metadata=sanitize_json_value({
                     "title": result.get("title"),
                     "mode": "lit_review",
-                },
+                    "num_sources": result.get("num_sources"),
+                }),
             )
 
         else:
@@ -522,11 +532,11 @@ def ask_question(request):
 
             Answer.objects.create(
                 question=question_obj,
-                text=result["answer"],
-                citations=result["citations"],
+                text=sanitize_text(result["answer"]),
+                citations=sanitize_json_value(result["citations"]),
             )
 
-            retrieved_chunks = [
+            retrieved_chunks = sanitize_json_value([
                 {
                     "doc": c.get("source"),
                     "page": c.get("page"),
@@ -535,7 +545,7 @@ def ask_question(request):
                     "score": c.get("score", 0.0),
                 }
                 for c in result.get("citations", [])
-            ]
+            ])
 
         # Log metrics (with grounding data)
         latency_ms = int((time.time() - start_time) * 1000)
@@ -618,36 +628,68 @@ def upload_pdf(request):
         ContentFile(file.read())
     )
 
-    full_path = Path(default_storage.path(saved_path))
     normalized = normalize_filename(file.name)
 
     # Register document in relational DB
     document, created = Document.objects.get_or_create(
         filename=normalized,
-        session=session
+        session=session,
+        defaults={"storage_path": saved_path, "status": "QUEUED"},
     )
+
+    previous_storage_path = None if created else document.resolved_storage_path
+    update_fields = []
+
+    if document.storage_path != saved_path:
+        document.storage_path = saved_path
+        update_fields.append("storage_path")
+
+    if created:
+        document.status = "QUEUED"
+        update_fields.append("status")
 
     # Reset status if re-uploading
     if not created:
-        document.status = 'UPLOADED'
+        document.status = 'QUEUED'
         document.error_message = None
         document.processing_started_at = None
         document.processing_completed_at = None
-        document.save()
+        update_fields.extend([
+            "status",
+            "error_message",
+            "processing_started_at",
+            "processing_completed_at",
+        ])
 
-    # Trigger async ingestion
-    def ingest_in_background():
-        service = IngestionService()
-        service.ingest_document(document.id, str(full_path))
+    if update_fields:
+        document.save(update_fields=update_fields)
 
-    thread = threading.Thread(target=ingest_in_background, daemon=True)
-    thread.start()
+    if (
+        previous_storage_path
+        and previous_storage_path != saved_path
+        and not _documents_using_storage_path(
+            previous_storage_path,
+            exclude_document_id=document.id,
+        ).exists()
+        and default_storage.exists(previous_storage_path)
+    ):
+        default_storage.delete(previous_storage_path)
+
+    job, _ = enqueue_job(
+        "DOCUMENT_INGEST",
+        document=document,
+        session=session,
+        payload={"document_id": document.id},
+    )
 
     return Response(
         {
-            "message": "PDF upload initiated. Processing in background.",
+            "message": "PDF upload queued for ingestion.",
             "document_id": document.id,
+            "job_id": job.id,
             "filename": file.name,
+            "stored_filename": document.filename,
+            "file_url": document.file_url,
             "session": session.name,
             "status": document.status
         },
@@ -674,14 +716,19 @@ def list_pdfs(request):
             status=status.HTTP_404_NOT_FOUND
         )
 
-    pdfs = session.documents.values(
-        "id",
-        "filename",
-        "title",
-        "abstract",
-        "status",
-        "error_message"
-    )
+    pdfs = [
+        {
+            "id": document.id,
+            "filename": document.filename,
+            "storage_path": document.storage_path,
+            "file_url": document.file_url,
+            "title": document.title,
+            "abstract": document.abstract,
+            "status": document.status,
+            "error_message": document.error_message,
+        }
+        for document in session.documents.all()
+    ]
 
 
     return Response(
@@ -734,9 +781,12 @@ def delete_session(request, session_name):
             
         # Filesystem cleanup: potentially delete all PDFs unique to this session
         for doc in session.documents.all():
-            other_uses = Document.objects.filter(filename=doc.filename).exclude(id=doc.id).exists()
+            other_uses = _documents_using_storage_path(
+                doc.resolved_storage_path,
+                exclude_document_id=doc.id,
+            ).exists()
             if not other_uses:
-                file_path = f"pdfs/{doc.filename}"
+                file_path = doc.resolved_storage_path
                 if default_storage.exists(file_path):
                     default_storage.delete(file_path)
         
@@ -793,8 +843,11 @@ def delete_pdf(request):
         print(f"Error deleting from Chroma: {e}")
 
     # 2. Delete from Filesystem
-    file_path = f"pdfs/{filename}"
-    other_uses = Document.objects.filter(filename=filename).exclude(id=document.id).exists()
+    file_path = document.resolved_storage_path
+    other_uses = _documents_using_storage_path(
+        document.resolved_storage_path,
+        exclude_document_id=document.id,
+    ).exists()
     if not other_uses:
         if default_storage.exists(file_path):
             default_storage.delete(file_path)

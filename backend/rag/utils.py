@@ -28,3 +28,26 @@ def get_session_path(session_name: str) -> str:
 
 def normalize_filename(name: str) -> str:
     return Path(name).name.strip().lower()
+
+
+def sanitize_text(value: str) -> str:
+    if not isinstance(value, str):
+        return value
+
+    # PostgreSQL JSON/text fields reject embedded NUL bytes.
+    return value.replace("\x00", "")
+
+
+def sanitize_json_value(value):
+    if isinstance(value, str):
+        return sanitize_text(value)
+    if isinstance(value, list):
+        return [sanitize_json_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [sanitize_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            sanitize_json_value(key): sanitize_json_value(val)
+            for key, val in value.items()
+        }
+    return value

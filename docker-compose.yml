@@ -69,6 +69,45 @@ services:
     ports:
       - "8000:8000"
 
+  backend-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    environment:
+      SECRET_KEY: ${SECRET_KEY:-django-insecure-4s#0ucylvvqnz@25y1-@b8-l#^wutb!doduq2odkl3@=iop1ja}
+      DEBUG: ${DEBUG:-True}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost,127.0.0.1,0.0.0.0}
+      DB_ENGINE: django.db.backends.postgresql
+      DB_NAME: navigator
+      DB_USER: navigator
+      DB_PASSWORD: navigator
+      DB_HOST: postgres
+      DB_PORT: 5432
+      CORS_ALLOW_ALL: "True"
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      CHROMA_PERSIST_DIR: /app/data/chroma
+      RAG_QA_USE_HYBRID: ${RAG_QA_USE_HYBRID:-True}
+      RAG_QA_USE_MULTI_QUERY: ${RAG_QA_USE_MULTI_QUERY:-False}
+      RAG_QA_USE_RERANKING: ${RAG_QA_USE_RERANKING:-True}
+      RAG_QA_TOP_K: ${RAG_QA_TOP_K:-8}
+      RAG_LLM_MODEL: ${RAG_LLM_MODEL:-mistral}
+      RAG_LLM_NUM_PREDICT: ${RAG_LLM_NUM_PREDICT:-320}
+      RAG_LLM_TEMPERATURE: ${RAG_LLM_TEMPERATURE:-0.2}
+      RAG_LLM_NUM_CTX: ${RAG_LLM_NUM_CTX:-4096}
+      RAG_LLM_KEEP_ALIVE: ${RAG_LLM_KEEP_ALIVE:-30m}
+    volumes:
+      - chroma_data:/app/data/chroma
+      - media_data:/app/media
+    command: ["sh", "-c", "python manage.py migrate --noinput && python manage.py process_ingestion_jobs"]
+
   # ---- React frontend ----
   frontend:
     build:

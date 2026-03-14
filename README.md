@@ -132,6 +132,15 @@ python manage.py runserver
 
 Backend runs on `http://127.0.0.1:8000`
 
+### 2b) Ingestion worker
+Run the durable ingestion worker in a second shell:
+
+```bash
+cd backend
+source venv/bin/activate  # Windows: .\\venv\\Scripts\\activate
+python manage.py process_ingestion_jobs
+```
+
 ### 3) Frontend
 ```bash
 cd frontend
@@ -154,6 +163,7 @@ Services:
 - `postgres` (15)
 - `ollama`
 - `backend` (`:8000`)
+- `backend-worker` (durable ingestion/import worker)
 - `frontend` (`:3000`)
 
 Optional GPU pass-through (compose override exists):
@@ -172,8 +182,8 @@ Key variables from `backend/.env.example`:
 
 ## Current Behavior Notes
 
-- Ingestion runs in background Python threads from API handlers.
-- `Document.status` transitions: `UPLOADED -> PROCESSING -> INDEXED` or `FAILED`.
+- Ingestion and external imports are queued in the database and processed by `python manage.py process_ingestion_jobs`.
+- `Document.status` transitions: `QUEUED/UPLOADED -> PROCESSING -> INDEXED` or `FAILED`.
 - Some imported sources ingest metadata-only (summary mode) when full PDF is unavailable.
 - Citation pages are currently stored zero-indexed in chunk metadata; frontend displays as one-indexed.
 - Session deletion removes session Chroma directory and attempts PDF cleanup when files are no longer referenced.
@@ -195,7 +205,7 @@ Notable suites:
 
 ## Known Gaps / Practical Caveats
 
-- Background thread ingestion is process-local (no distributed task queue yet).
+- The ingestion worker is durable and database-backed, but still requires a separate long-lived worker process to be running.
 - External provider rate limits and incomplete metadata vary by source.
 - PubMed path currently imports primarily in metadata-summary mode.
 - Some legacy helper scripts (`backend/test_query.py`, `backend/test_ingest.py`) are outdated relative to current function signatures.
@@ -203,3 +213,4 @@ Notable suites:
 ## License
 
 No explicit license file is currently present in the repository.
+

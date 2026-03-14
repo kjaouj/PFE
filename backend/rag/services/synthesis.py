@@ -56,6 +56,207 @@ class SynthesisService:
         parsed["claims"] = normalized_claims
         return parsed
 
+    def _format_literature_review(self, topic: str, parsed: Dict[str, Any]) -> str:
+        lines = [
+            "1. Scope of Review",
+            parsed.get("scope", f"This review synthesizes the selected papers on {topic}."),
+            "",
+            "2. Paper-by-Paper Focus",
+        ]
+
+        paper_summaries = parsed.get("paper_summaries", [])
+        for paper in paper_summaries:
+            paper_id = paper.get("paper_id", "unknown")
+            focus = paper.get("focus", "")
+            contribution = paper.get("contribution", "")
+            lines.append(f"- {paper_id}: {focus}".strip())
+            if contribution:
+                lines.append(f"  Contribution: {contribution}")
+
+        section_map = [
+            ("3. Common Approaches Across Papers", parsed.get("common_approaches", [])),
+            ("4. Important Differences Between Papers", parsed.get("important_differences", [])),
+            ("5. Methodological Patterns", parsed.get("methodological_patterns", [])),
+            ("6. Open Problems and Research Gaps", parsed.get("open_problems", [])),
+            ("7. Practical Takeaways", parsed.get("practical_takeaways", [])),
+        ]
+
+        for title, items in section_map:
+            lines.append("")
+            lines.append(title)
+            if items:
+                for item in items:
+                    lines.append(f"- {item}")
+            else:
+                lines.append("- The retrieved evidence did not support a confident synthesis for this section.")
+
+        return "\n".join(lines).strip()
+
+    def _invoke_text(self, prompt: str) -> str:
+        response = self.llm.invoke(prompt)
+        return response.strip() if isinstance(response, str) else str(response).strip()
+
+    def _parse_tagged_block(self, response: str, expected_tags: List[str]) -> Dict[str, str]:
+        parsed = {tag: "" for tag in expected_tags}
+        current_tag = None
+
+        for raw_line in response.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            matched_tag = None
+            for tag in expected_tags:
+                prefix = f"{tag}:"
+                if line.upper().startswith(prefix):
+                    matched_tag = tag
+                    parsed[tag] = line[len(prefix):].strip()
+                    current_tag = tag
+                    break
+
+            if matched_tag is None and current_tag is not None:
+                parsed[current_tag] = f"{parsed[current_tag]} {line}".strip()
+
+        return parsed
+
+    def _fallback_paper_summary(self, source: str, source_docs: List[Any]) -> Dict[str, str]:
+        snippets = [doc.page_content.strip() for doc in source_docs[:3] if doc.page_content.strip()]
+        combined = " ".join(snippets)
+        combined = combined[:400] if combined else "Retrieved evidence was limited."
+        return {
+            "paper_id": source,
+            "focus": combined,
+            "methods": combined,
+            "contributions": combined,
+            "limitations": "The retrieved snippets do not expose clear limitations for this paper.",
+        }
+
+    def _summarize_paper_for_review(self, source: str, source_docs: List[Any]) -> Dict[str, str]:
+        context_lines = []
+        for doc in source_docs[:4]:
+            raw_page = doc.metadata.get("page", "?")
+            page = raw_page + 1 if isinstance(raw_page, int) else raw_page
+            context_lines.append(f"[Page {page}] {doc.page_content}")
+        context = "\n".join(context_lines)
+
+        prompt = f"""You are preparing a literature review note for a single paper.
+
+Paper filename: {source}
+
+Using ONLY the snippets below, write four short fields. Do not use generic hedging like
+"this paper appears to" or "the text suggests". Be direct and academic.
+
+Return plain text with exactly these labels:
+FOCUS: one sentence on the main research direction or problem
+METHODS: one sentence on the methods or technical approach
+CONTRIBUTIONS: one sentence on the paper's main contribution
+LIMITATIONS: one sentence on limitations, gaps, or unresolved issues; if not evident, say so explicitly
+
+Snippets:
+{context}
+"""
+        response = self._invoke_text(prompt)
+        parsed = self._parse_tagged_block(
+            response,
+            ["FOCUS", "METHODS", "CONTRIBUTIONS", "LIMITATIONS"],
+        )
+        if not parsed["FOCUS"] or not parsed["METHODS"] or not parsed["CONTRIBUTIONS"]:
+            return self._fallback_paper_summary(source, source_docs)
+
+        return {
+            "paper_id": source,
+            "focus": parsed["FOCUS"],
+            "methods": parsed["METHODS"],
+            "contributions": parsed["CONTRIBUTIONS"],
+            "limitations": parsed["LIMITATIONS"] or "The retrieved snippets do not expose clear limitations for this paper.",
+        }
+
+    def _parse_bullets(self, response: str) -> List[str]:
+        bullets = []
+        for raw_line in response.splitlines():
+            line = raw_line.strip()
+            if line.startswith("- "):
+                bullets.append(line[2:].strip())
+            elif line.startswith("* "):
+                bullets.append(line[2:].strip())
+        return [bullet for bullet in bullets if bullet]
+
+    def _fallback_section_bullets(
+        self,
+        section_name: str,
+        paper_summaries: List[Dict[str, str]],
+    ) -> List[str]:
+        if not paper_summaries:
+            return ["The retrieved evidence did not support a confident synthesis for this section."]
+
+        if section_name == "common_approaches":
+            return [
+                "Across the selected papers, the retrieved evidence shows a shared focus on closely related research directions, but the exact overlap remains limited in the available snippets."
+            ]
+        if section_name == "important_differences":
+            return [
+                f"{paper_summaries[0]['paper_id']} emphasizes {paper_summaries[0]['focus']}, whereas {paper_summaries[1]['paper_id']} emphasizes {paper_summaries[1]['focus']}."
+                if len(paper_summaries) > 1
+                else f"{paper_summaries[0]['paper_id']} is the only paper summarized in the retrieved evidence."
+            ]
+        if section_name == "methodological_patterns":
+            return [
+                f"{summary['paper_id']} uses {summary['methods']}"
+                for summary in paper_summaries[:3]
+            ]
+        if section_name == "open_problems":
+            return [
+                f"{summary['paper_id']}: {summary['limitations']}"
+                for summary in paper_summaries[:3]
+            ]
+        if section_name == "practical_takeaways":
+            return [
+                f"{summary['paper_id']}: {summary['contributions']}"
+                for summary in paper_summaries[:3]
+            ]
+        return ["The retrieved evidence did not support a confident synthesis for this section."]
+
+    def _synthesize_section(
+        self,
+        *,
+        topic: str,
+        section_name: str,
+        instruction: str,
+        paper_summaries: List[Dict[str, str]],
+    ) -> List[str]:
+        summaries_text = "\n".join(
+            [
+                (
+                    f"- {summary['paper_id']}\n"
+                    f"  Focus: {summary['focus']}\n"
+                    f"  Methods: {summary['methods']}\n"
+                    f"  Contributions: {summary['contributions']}\n"
+                    f"  Limitations: {summary['limitations']}"
+                )
+                for summary in paper_summaries
+            ]
+        )
+        prompt = f"""You are writing the "{section_name}" section of an academic literature review on "{topic}".
+
+Paper summaries:
+{summaries_text}
+
+Task:
+{instruction}
+
+Rules:
+- Return 2 to 4 bullets only.
+- Every bullet must mention at least one filename.
+- Prefer explicit comparisons across papers instead of isolated summaries.
+- Do not use generic phrases like "the text provided appears to be".
+- Do not output any heading or prose outside the bullets.
+"""
+        response = self._invoke_text(prompt)
+        bullets = self._parse_bullets(response)
+        if bullets:
+            return bullets
+        return self._fallback_section_bullets(section_name, paper_summaries)
+
     def compare_papers(
         self,
         question: str,
@@ -179,38 +380,69 @@ JSON OUTPUT:
                 "content": "No documents found to review"
             }
 
-        context = "\n\n".join([
-            f"Source: {d.metadata.get('source', 'unknown')} (Page {(d.metadata.get('page', '?') + 1) if isinstance(d.metadata.get('page', '?'), int) else d.metadata.get('page', '?')})\n{d.page_content}"
-            for d in docs
-        ])
+        docs_by_source = defaultdict(list)
+        for doc in docs:
+            docs_by_source[doc.metadata.get("source", "unknown")].append(doc)
 
-        prompt = f"""You are a research expert writing a structured literature review on: "{topic}"
+        context_parts = []
+        for source, source_docs in docs_by_source.items():
+            section_lines = [f"--- PAPER: {source} ---"]
+            for doc in source_docs:
+                raw_page = doc.metadata.get("page", "?")
+                page = raw_page + 1 if isinstance(raw_page, int) else raw_page
+                section_lines.append(f"[Page {page}] {doc.page_content}")
+            context_parts.append("\n".join(section_lines))
 
-Based on the retrieved snippets below, synthesize a review with the following sections:
-1. Introduction: Overview of the topic
-2. Key Themes: Major findings identified across documents
-3. Methodological Approaches: How the research was conducted
-4. Synthesis: How the papers relate to each other
-5. Conclusion: Future directions or summary
+        paper_summaries = [
+            self._summarize_paper_for_review(source, source_docs)
+            for source, source_docs in docs_by_source.items()
+        ]
 
-Use formal academic tone. 
-Retrieved Snippets:
-{context}
+        scope = (
+            f"This review synthesizes {len(docs_by_source)} selected papers on {topic}. "
+            f"Each paper is treated separately before drawing cross-paper conclusions."
+        )
+        parsed = {
+            "scope": scope,
+            "paper_summaries": paper_summaries,
+            "common_approaches": self._synthesize_section(
+                topic=topic,
+                section_name="common_approaches",
+                instruction="Identify the main research directions or shared approaches across the papers.",
+                paper_summaries=paper_summaries,
+            ),
+            "important_differences": self._synthesize_section(
+                topic=topic,
+                section_name="important_differences",
+                instruction="Explain the most important differences in focus, assumptions, or contribution across the papers.",
+                paper_summaries=paper_summaries,
+            ),
+            "methodological_patterns": self._synthesize_section(
+                topic=topic,
+                section_name="methodological_patterns",
+                instruction="Summarize recurring methodological patterns or design choices across the papers.",
+                paper_summaries=paper_summaries,
+            ),
+            "open_problems": self._synthesize_section(
+                topic=topic,
+                section_name="open_problems",
+                instruction="Identify unresolved issues, limitations, or open questions across the papers.",
+                paper_summaries=paper_summaries,
+            ),
+            "practical_takeaways": self._synthesize_section(
+                topic=topic,
+                section_name="practical_takeaways",
+                instruction="Provide practical takeaways about where the field is moving based on the selected papers.",
+                paper_summaries=paper_summaries,
+            ),
+        }
 
-LITERATURE REVIEW:
-"""
-
-        response = self.llm.invoke(prompt)
-
-        # Clean response if the model included the thinking process
-        if "LITERATURE REVIEW:" in response:
-            final_content = response.split("LITERATURE REVIEW:")[-1].strip()
-        else:
-            final_content = response.strip()
+        final_content = self._format_literature_review(topic, parsed)
 
         return {
             "topic": topic,
             "title": f"Literature Review: {topic}",
             "content": final_content,
-            "num_sources": len(set(d.metadata.get('source') for d in docs))
+            "num_sources": len(docs_by_source),
+            "structured_review": parsed,
         }

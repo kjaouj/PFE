@@ -5,16 +5,14 @@ Uses Biopython's Entrez module to search and fetch metadata from PubMed (MEDLINE
 """
 
 import logging
-import os
 from datetime import datetime
 from typing import List, Dict, Optional
-import threading
 
 from Bio import Entrez
 from django.conf import settings
 
 from rag.models import PaperSource, Document, Session
-from rag.services.ingestion import IngestionService
+from rag.services.job_queue import enqueue_job
 from rag.services.resilience import call_with_resilience, CircuitOpenError
 from rag.utils import normalize_filename
 
@@ -28,7 +26,6 @@ class PubmedService:
     """Service for interacting with PubMed API."""
 
     def __init__(self):
-        self.ingestion_service = IngestionService()
         # Built-in Entrez retry controls.
         Entrez.max_tries = max(2, int(getattr(settings, "EXTERNAL_API_RETRIES", 3)))
         Entrez.sleep_between_tries = float(
@@ -105,8 +102,6 @@ class PubmedService:
             
             # 1. Try to find the PDF URL (PubMed doesn't give direct PDFs usually) 
             # We'll use the LinkOut or PMC if available
-            pdf_url = metadata['entry_url'] # Fallback
-            
             safe_filename = normalize_filename(f"pubmed_{pubmed_id}.pdf")
             document, created = Document.objects.get_or_create(
                 filename=safe_filename, 
@@ -114,16 +109,20 @@ class PubmedService:
                 defaults={
                     'title': metadata['title'],
                     'abstract': metadata['abstract'],
-                    'status': 'UPLOADED'
+                    'status': 'QUEUED'
                 }
             )
             
             if not created:
+                document.status = 'QUEUED'
                 document.title = metadata['title']
                 document.abstract = metadata['abstract']
-                document.save()
+                document.error_message = None
+                document.processing_started_at = None
+                document.processing_completed_at = None
+                document.save(update_fields=["status", "title", "abstract", "error_message", "processing_started_at", "processing_completed_at"])
             
-            PaperSource.objects.get_or_create(
+            paper_source, _ = PaperSource.objects.get_or_create(
                 source_type='pubmed',
                 external_id=pubmed_id,
                 defaults={
@@ -134,32 +133,22 @@ class PubmedService:
                     'document': document
                 }
             )
+            job, _ = enqueue_job(
+                "PUBMED_IMPORT",
+                document=document,
+                paper_source=paper_source,
+                session=session,
+                payload={"metadata": metadata},
+            )
 
-            # Trigger background download 
-            def background_import(doc_id, meta):
-                from rag.models import Document
-                from rag.services.ingestion import IngestionService
-                try:
-                    ingestion = IngestionService()
-                    # For PubMed, we skip the PDF download attempt since most are paywalled
-                    # and go straight to metadata ingestion as a high-quality summary.
-                    ingestion.ingest_metadata_only(
-                        doc_id, 
-                        meta['title'], 
-                        meta['abstract'], 
-                        ", ".join(meta['authors'])
-                    )
-                    logger.info(f"PubMed import completed as metadata-only for {pubmed_id}")
-                except Exception as e:
-                    logger.error(f"PubMed background thread failed: {e}")
-                    doc = Document.objects.get(id=doc_id)
-                    doc.status = 'FAILED'
-                    doc.error_message = str(e)
-                    doc.save()
-
-            threading.Thread(target=background_import, args=(document.id, metadata), daemon=True).start()
-
-            return {"success": True, "message": "Import initiated (Summary-only mode)"}
+            return {
+                "success": True,
+                "message": "Import queued (summary-only mode)",
+                "document_id": document.id,
+                "paper_source_id": paper_source.id,
+                "job_id": job.id,
+                "status": document.status,
+            }
 
         except Exception as e:
             logger.error(f"Import failed: {e}")

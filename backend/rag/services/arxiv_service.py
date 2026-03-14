@@ -9,18 +9,12 @@ Provides functionality to:
 """
 
 import logging
-import os
-import threading
-from pathlib import Path
 from typing import List, Dict, Optional
 
 import arxiv
-import requests
-from django.conf import settings
-from django.core.files.storage import default_storage
 
 from rag.models import PaperSource, Document, Session
-from rag.services.ingestion import IngestionService
+from rag.services.job_queue import enqueue_job
 from rag.services.resilience import call_with_resilience, CircuitOpenError
 from rag.utils import normalize_filename
 
@@ -37,8 +31,6 @@ class ArxivService:
             delay_seconds=3.0,
             num_retries=5
         )
-        self.ingestion_service = IngestionService()
-
     def search(self, query: str, max_results: int = 10) -> List[Dict]:
         """
         Search arXiv for papers matching the query.
@@ -121,7 +113,23 @@ class ArxivService:
             safe_filename = normalize_filename(f"{arxiv_id.replace('/', '_')}.pdf")
             document, created = Document.objects.get_or_create(
                 filename=safe_filename,
-                session=session
+                session=session,
+                defaults={"storage_path": f"pdfs/{safe_filename}", "status": "QUEUED"},
+            )
+            if document.storage_path != f"pdfs/{safe_filename}":
+                document.storage_path = f"pdfs/{safe_filename}"
+            document.status = "QUEUED"
+            document.error_message = None
+            document.processing_started_at = None
+            document.processing_completed_at = None
+            document.save(
+                update_fields=[
+                    "storage_path",
+                    "status",
+                    "error_message",
+                    "processing_started_at",
+                    "processing_completed_at",
+                ]
             )
             
             # 3. Create/Update PaperSource
@@ -143,34 +151,18 @@ class ArxivService:
                 paper_source.document = document
                 paper_source.save()
 
-            # 4. Handle PDF Download & Ingestion
+            job = None
             if download_pdf:
-                # Trigger background download and ingestion
-                def background_import():
-                    try:
-                        save_dir = os.path.join(settings.MEDIA_ROOT, "pdfs")
-                        Path(save_dir).mkdir(parents=True, exist_ok=True)
-                        
-                        # Search for paper again to get the object
-                        search = arxiv.Search(id_list=[arxiv_id])
-                        paper = next(self.client.results(search))
-                        
-                        filepath = os.path.join(save_dir, safe_filename)
-                        paper.download_pdf(dirpath=save_dir, filename=safe_filename)
-                        
-                        # Run ingestion
-                        self.ingestion_service.ingest_document(document.id, filepath)
-                        
-                        paper_source.imported = True
-                        paper_source.save()
-                    except Exception as e:
-                        logger.error(f"Background import failed for {arxiv_id}: {e}")
-                        document.status = 'FAILED'
-                        document.error_message = f"Download/Ingest failed: {str(e)}"
-                        document.save()
-
-                thread = threading.Thread(target=background_import, daemon=True)
-                thread.start()
+                job, _ = enqueue_job(
+                    "ARXIV_IMPORT",
+                    document=document,
+                    paper_source=paper_source,
+                    session=session,
+                    payload={
+                        "arxiv_id": arxiv_id,
+                        "storage_path": document.storage_path,
+                    },
+                )
 
             return {
                 "success": True,
@@ -179,7 +171,8 @@ class ArxivService:
                 "arxiv_id": arxiv_id,
                 "title": metadata['title'],
                 "status": document.status,
-                "message": "Paper import initiated"
+                "job_id": job.id if job else None,
+                "message": "Paper import queued" if job else "Paper import metadata saved"
             }
 
         except Exception as e:

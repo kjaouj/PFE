@@ -3,6 +3,7 @@ import requests
 from datetime import datetime
 from typing import List, Dict
 
+from rag.services.job_queue import enqueue_job
 from rag.services.resilience import (
     call_with_resilience,
     CircuitOpenError,
@@ -81,12 +82,7 @@ class SemanticScholarService:
 
     def import_paper(self, paper_id: str, session_name: str, source_type: str = 'doi') -> Dict:
         """Import from Semantic Scholar with PDF fallback to Abstract."""
-        import os
-        import threading
-        from pathlib import Path
-        from django.conf import settings
         from rag.models import Session, Document, PaperSource
-        from rag.services.ingestion import IngestionService
         from rag.utils import normalize_filename
 
         try:
@@ -100,15 +96,26 @@ class SemanticScholarService:
                 filename=safe_filename, 
                 session=session,
                 defaults={
+                    'storage_path': f"pdfs/{safe_filename}" if pdf_url else None,
+                    'status': 'QUEUED',
                     'title': metadata['title'],
                     'abstract': metadata['abstract'],
                 }
             )
             
             if not created:
+                if pdf_url:
+                    document.storage_path = f"pdfs/{safe_filename}"
+                document.status = 'QUEUED'
                 document.title = metadata['title']
                 document.abstract = metadata['abstract']
-                document.save()
+                document.error_message = None
+                document.processing_started_at = None
+                document.processing_completed_at = None
+                update_fields = ["status", "title", "abstract", "error_message", "processing_started_at", "processing_completed_at"]
+                if pdf_url:
+                    update_fields.append("storage_path")
+                document.save(update_fields=update_fields)
             
             published_date = None
             year_text = self._safe_text(metadata.get("published_date"))
@@ -137,63 +144,26 @@ class SemanticScholarService:
                 paper_source.entry_url = metadata.get("entry_url", "")
                 paper_source.document = document
                 paper_source.save()
-
-
-            def background_import(doc_id, url, meta):
-                from rag.models import Document
-                from rag.services.ingestion import IngestionService
-                try:
-                    ingestion = IngestionService()
-                    if url:
-                        # Attempt PDF download
-                        save_dir = os.path.join(settings.MEDIA_ROOT, "pdfs")
-                        Path(save_dir).mkdir(parents=True, exist_ok=True)
-                        doc = Document.objects.get(id=doc_id)
-                        doc.status = 'PROCESSING'
-                        doc.save()
-                        
-                        filepath = os.path.join(save_dir, doc.filename)
-                        resp = requests.get(url, stream=True, timeout=30)
-                        resp.raise_for_status()
-                        with open(filepath, 'wb') as f:
-                            for chunk in resp.iter_content(chunk_size=8192):
-                                f.write(chunk)
-                        
-                        ingestion.ingest_document(doc.id, filepath)
-                    else:
-                        # Fallback to metadata ingestion
-                        ingestion.ingest_metadata_only(
-                            doc_id, 
-                            meta['title'], 
-                            meta['abstract'], 
-                            ", ".join(meta['authors'])
-                        )
-                    PaperSource.objects.filter(source_type=source_type, external_id=paper_id).update(
-                        document_id=doc_id,
-                        imported=True,
-                    )
-                except Exception as e:
-                    logger.error(f"Scholar import failed: {e}")
-                    # If PDF failed, try abstract fallback as last resort
-                    try:
-                        ingestion.ingest_metadata_only(
-                            doc_id, 
-                            meta['title'], 
-                            meta['abstract'], 
-                            ", ".join(meta['authors'])
-                        )
-                        PaperSource.objects.filter(source_type=source_type, external_id=paper_id).update(
-                            document_id=doc_id,
-                            imported=True,
-                        )
-                    except Exception:
-                        doc = Document.objects.get(id=doc_id)
-                        doc.status = 'FAILED'
-                        doc.error_message = str(e)
-                        doc.save()
-
-            threading.Thread(target=background_import, args=(document.id, pdf_url, metadata), daemon=True).start()
-            return {"success": True, "message": "Import initiated (Summary fallback enabled)"}
+            job, _ = enqueue_job(
+                "SEMANTIC_SCHOLAR_IMPORT",
+                document=document,
+                paper_source=paper_source,
+                session=session,
+                payload={
+                    "metadata": metadata,
+                    "pdf_url": pdf_url,
+                    "source_type": source_type,
+                    "storage_path": document.storage_path,
+                },
+            )
+            return {
+                "success": True,
+                "message": "Import queued (summary fallback enabled)",
+                "document_id": document.id,
+                "paper_source_id": paper_source.id,
+                "job_id": job.id,
+                "status": document.status,
+            }
 
         except Exception as e:
             logger.error(f"Scholar import failed: {e}")

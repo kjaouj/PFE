@@ -11,6 +11,7 @@ from django.db.models.functions import TruncDate
 from datetime import timedelta
 
 from rag.models import RunLog, Session, Question
+from rag.utils import sanitize_json_value, sanitize_text
 
 
 class MetricsService:
@@ -45,15 +46,15 @@ class MetricsService:
         log = RunLog.objects.create(
             session=session,
             question=question,
-            question_text=question_text,
+            question_text=sanitize_text(question_text),
             mode=mode,
-            sources=sources or [],
+            sources=sanitize_json_value(sources or []),
             latency_ms=latency_ms,
-            retrieved_chunks=retrieved_chunks,
+            retrieved_chunks=sanitize_json_value(retrieved_chunks),
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             error_type=error_type,
-            error_message=error_message,
+            error_message=sanitize_text(error_message) if error_message else None,
             # grounding
             is_refusal=is_refusal,
             is_insufficient_evidence=is_insufficient_evidence,
