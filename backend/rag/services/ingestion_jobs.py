@@ -13,6 +13,7 @@ from django.utils import timezone
 
 from rag.models import Document, IngestionJob, PaperSource
 from rag.services.ingestion import IngestionService
+from rag.services.import_utils import looks_like_pdf_url
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,15 @@ class IngestionJobRunner:
             return
         if job.job_type == "SEMANTIC_SCHOLAR_IMPORT":
             self._run_semantic_scholar_import(
+                document_id=job.document_id,
+                paper_source_id=job.paper_source_id,
+                metadata=payload["metadata"],
+                pdf_url=payload.get("pdf_url"),
+                storage_path=payload.get("storage_path"),
+            )
+            return
+        if job.job_type == "REMOTE_PDF_IMPORT":
+            self._run_remote_pdf_import(
                 document_id=job.document_id,
                 paper_source_id=job.paper_source_id,
                 metadata=payload["metadata"],
@@ -212,6 +222,39 @@ class IngestionJobRunner:
         )
         PaperSource.objects.filter(id=paper_source_id).update(imported=True)
 
+    def _run_remote_pdf_import(
+        self,
+        *,
+        document_id: int,
+        paper_source_id: int,
+        metadata: dict,
+        pdf_url: str | None,
+        storage_path: str | None,
+    ):
+        if pdf_url and storage_path:
+            try:
+                self._download_url_to_storage(pdf_url, storage_path)
+                self.ingestion_service.ingest_document(
+                    document_id,
+                    default_storage.path(storage_path),
+                )
+                PaperSource.objects.filter(id=paper_source_id).update(imported=True)
+                return
+            except Exception as exc:
+                logger.warning(
+                    "Remote PDF import failed for document %s; falling back to metadata: %s",
+                    document_id,
+                    exc,
+                )
+
+        self.ingestion_service.ingest_metadata_only(
+            document_id,
+            metadata.get("title") or "Untitled paper",
+            metadata.get("abstract") or "",
+            ", ".join(metadata.get("authors") or []),
+        )
+        PaperSource.objects.filter(id=paper_source_id).update(imported=True)
+
     def _run_arxiv_import(
         self,
         *,
@@ -232,12 +275,26 @@ class IngestionJobRunner:
         PaperSource.objects.filter(id=paper_source_id).update(imported=True)
 
     def _download_url_to_storage(self, url: str, storage_path: str):
+        if not looks_like_pdf_url(url):
+            raise ValueError("Remote URL does not look like a direct PDF")
         absolute_path = Path(default_storage.path(storage_path))
         absolute_path.parent.mkdir(parents=True, exist_ok=True)
 
         response = requests.get(url, stream=True, timeout=30)
         response.raise_for_status()
+        content_type = (response.headers.get("Content-Type") or "").lower()
+        content_disposition = (response.headers.get("Content-Disposition") or "").lower()
+        if "pdf" not in content_type and ".pdf" not in content_disposition:
+            first_chunk = next(response.iter_content(chunk_size=1024), b"")
+            if not first_chunk.startswith(b"%PDF-"):
+                raise ValueError("Remote response is not a PDF")
+            chunks = [first_chunk]
+        else:
+            chunks = []
         with open(absolute_path, "wb") as file_handle:
+            for chunk in chunks:
+                if chunk:
+                    file_handle.write(chunk)
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
                     file_handle.write(chunk)

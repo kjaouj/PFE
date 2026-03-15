@@ -4,6 +4,9 @@ from django.test import SimpleTestCase, TestCase
 from rest_framework.test import APIClient
 
 from rag.models import Document, IngestionJob, PaperSource, Session
+from rag.services.discovery import DiscoveryService
+from rag.services.import_utils import looks_like_pdf_url, queue_remote_import
+from rag.services.openalex_service import OpenAlexService
 from rag.services.resilience import CircuitOpenError, TransientExternalError
 from rag.services.semanticscholar_service import SemanticScholarService
 from rag.services.synthesis import SynthesisService
@@ -30,6 +33,205 @@ class SemanticScholarServiceTests(SimpleTestCase):
         self.assertEqual(metadata["abstract"], "No abstract available.")
         self.assertEqual(metadata["entry_url"], "")
         self.assertEqual(metadata["published_date"], "2026")
+
+    @patch.object(SemanticScholarService, "search")
+    def test_fetch_paper_graph_derives_related_papers_from_title_search(self, mock_search):
+        service = SemanticScholarService()
+        mock_search.return_value = [
+            {
+                "external_id": "other-paper",
+                "title": "Related Paper",
+                "authors": ["Author"],
+                "abstract": "Abstract",
+                "published_date": "2026",
+                "entry_url": "https://example.org/paper",
+                "source_type": "semanticscholar",
+            }
+        ]
+
+        related = service._derive_related_papers("seed-paper", "Seed Title", limit=3)
+
+        self.assertEqual(len(related), 1)
+        self.assertEqual(related[0]["relationship"], "related_search")
+
+
+class OpenAlexServiceTests(SimpleTestCase):
+    def test_reconstruct_abstract_from_inverted_index(self):
+        service = OpenAlexService()
+        abstract = service._reconstruct_abstract(
+            {
+                "attention": [0],
+                "is": [1],
+                "all": [2],
+                "you": [3],
+                "need": [4],
+            }
+        )
+        self.assertEqual(abstract, "attention is all you need")
+
+    def test_openalex_metadata_ignores_landing_page_as_pdf(self):
+        service = OpenAlexService()
+        metadata = service._extract_metadata(
+            {
+                "id": "https://openalex.org/W123",
+                "display_name": "Paper",
+                "authorships": [],
+                "abstract_inverted_index": {},
+                "publication_year": 2024,
+                "best_oa_location": {"landing_page_url": "https://publisher.org/article/123"},
+                "primary_location": {"landing_page_url": "https://publisher.org/article/123"},
+                "open_access": {"oa_url": "https://publisher.org/article/123"},
+            }
+        )
+        self.assertEqual(metadata["pdf_url"], "")
+
+    @patch("rag.services.openalex_service.settings")
+    def test_openalex_content_download_url_uses_content_api_when_available(self, mock_settings):
+        mock_settings.OPENALEX_API_KEY = "oa-key"
+        service = OpenAlexService()
+        url = service._content_download_url(
+            {
+                "content_url": "https://content.openalex.org/works/W123",
+                "has_content_pdf": True,
+            }
+        )
+        self.assertEqual(url, "https://content.openalex.org/works/W123.pdf?api_key=oa-key")
+
+    def test_graph_items_prefer_arxiv_import_when_arxiv_id_exists(self):
+        service = OpenAlexService()
+        item = service._to_graph_item(
+            {
+                "external_id": "W123",
+                "arxiv_id": "2603.12254v1",
+                "title": "Paper",
+                "authors": ["Alice"],
+                "published_date": "2026",
+                "entry_url": "https://openalex.org/W123",
+                "abstract": "Abstract",
+                "source_type": "openalex",
+            },
+            "related",
+        )
+        self.assertEqual(item["provider"], "arxiv")
+        self.assertEqual(item["id"], "2603.12254v1")
+
+    def test_resolve_best_match_prefers_exact_arxiv_match(self):
+        service = OpenAlexService()
+        service.search = lambda query, max_results, prefer_content=False: [
+            {
+                "external_id": "W123",
+                "title": "One-step Latent-free Image Generation with Pixel Mean Flows",
+                "arxiv_id": "2603.12254v1",
+                "doi": "",
+            }
+        ]
+        match = service.resolve_best_match(
+            title="One-step Latent-free Image Generation with Pixel Mean Flows",
+            arxiv_id="2603.12254v1",
+        )
+        self.assertEqual(match["external_id"], "W123")
+
+
+class DiscoveryServiceTests(SimpleTestCase):
+    def test_topic_oriented_transformer_question_is_treated_as_discoverable(self):
+        service = DiscoveryService()
+        self.assertTrue(service.should_use_external_discovery("Explain transformer architecture"))
+
+    def test_ai_topic_provider_order_prefers_arxiv(self):
+        service = DiscoveryService()
+        self.assertEqual(
+            service._provider_order("What do recent papers say about RAG for LLM agents?"),
+            ["arxiv", "openalex", "europepmc"],
+        )
+
+    def test_arxiv_suggestions_keep_arxiv_provider(self):
+        service = DiscoveryService()
+        suggestion = service._result_to_suggestion(
+            {
+                "arxiv_id": "2603.12254v1",
+                "external_id": "2603.12254v1",
+                "title": "Test Paper",
+                "authors": ["Alice"],
+                "abstract": "Abstract",
+                "entry_url": "https://arxiv.org/abs/2603.12254v1",
+                "published_date": "2026-03-01",
+                "source_type": "arxiv",
+            }
+        )
+        self.assertEqual(suggestion["provider"], "arxiv")
+        self.assertEqual(suggestion["id"], "2603.12254v1")
+
+    @patch.object(DiscoveryService, "_generate_answer")
+    @patch.object(DiscoveryService, "_search_provider")
+    def test_discovery_falls_back_to_other_providers_when_semantic_scholar_is_rate_limited(
+        self,
+        mock_search_provider,
+        mock_generate_answer,
+    ):
+        mock_generate_answer.return_value = "Transformer overview from discovered sources."
+
+        def _side_effect(provider, query, max_results):
+            if provider == "openalex":
+                raise TransientExternalError("OpenAlex rate limited (429)")
+            if provider == "europepmc":
+                return [
+                    {
+                        "external_id": "PMC1234",
+                        "title": "Attention Is All You Need",
+                        "authors": ["Ashish Vaswani"],
+                        "abstract": "Transformer architecture based on attention.",
+                        "published_date": "2017-06-12",
+                        "entry_url": "https://europepmc.org/article/MED/1234",
+                        "source_type": "europepmc",
+                    }
+                ]
+            return []
+
+        mock_search_provider.side_effect = _side_effect
+
+        result = DiscoveryService().answer_query_from_external_search("Explain transformer architecture")
+
+        self.assertEqual(result["discovery_mode"], "external_search_answer_with_fallback")
+        self.assertEqual(result["suggested_sources"][0]["provider"], "europepmc")
+        self.assertEqual(result["suggested_sources"][0]["id"], "PMC1234")
+
+    @patch.object(DiscoveryService, "_search_provider")
+    def test_discovery_returns_provider_unavailable_response_when_all_searches_fail(
+        self,
+        mock_search_provider,
+    ):
+        mock_search_provider.side_effect = TransientExternalError("provider unavailable")
+
+        result = DiscoveryService().answer_query_from_external_search("Explain transformer architecture")
+
+        self.assertEqual(result["discovery_mode"], "external_search_unavailable")
+        self.assertTrue(result["is_refusal"])
+
+
+class ImportUtilsTests(TestCase):
+    def test_looks_like_pdf_url_only_accepts_direct_pdf_urls(self):
+        self.assertTrue(looks_like_pdf_url("https://example.org/paper.pdf"))
+        self.assertFalse(looks_like_pdf_url("https://example.org/landing-page"))
+
+    def test_queue_remote_import_uses_summary_filename_for_non_pdf_url(self):
+        session = Session.objects.create(name="queue-remote-summary")
+        result = queue_remote_import(
+            session_name=session.name,
+            source_type="openalex",
+            external_id="W123",
+            metadata={
+                "title": "Landing page only",
+                "authors": ["Alice"],
+                "abstract": "Abstract",
+                "published_date": "2026",
+                "entry_url": "https://example.org/article",
+            },
+            pdf_url="https://example.org/article",
+            filename_prefix="openalex",
+        )
+        doc = Document.objects.get(id=result["document_id"])
+        self.assertTrue(doc.filename.endswith("_abstract.txt"))
+        self.assertIsNone(doc.storage_path)
 
 
 class ExternalViewErrorMappingTests(TestCase):
@@ -108,6 +310,33 @@ class ExternalImportQueueTests(TestCase):
         job = IngestionJob.objects.get(id=result["job_id"])
         self.assertEqual(job.status, "QUEUED")
         self.assertEqual(job.job_type, "SEMANTIC_SCHOLAR_IMPORT")
+
+    @patch.object(OpenAlexService, "fetch_metadata")
+    @patch.object(OpenAlexService, "_resolve_fulltext_url")
+    def test_openalex_import_enqueues_remote_pdf_job(
+        self,
+        mock_resolve_fulltext_url,
+        mock_fetch_metadata,
+    ):
+        mock_fetch_metadata.return_value = {
+            "external_id": "W123",
+            "title": "OpenAlex paper",
+            "authors": ["Alice"],
+            "abstract": "Abstract text",
+            "published_date": "2026",
+            "entry_url": "https://openalex.org/W123",
+            "pdf_url": "",
+            "doi": "10.1000/test",
+            "source_type": "openalex",
+        }
+        mock_resolve_fulltext_url.return_value = "https://example.org/paper.pdf"
+        session = Session.objects.create(name="openalex-import-session")
+
+        result = OpenAlexService().import_paper("W123", session.name)
+
+        self.assertTrue(result["success"])
+        job = IngestionJob.objects.get(id=result["job_id"])
+        self.assertEqual(job.job_type, "REMOTE_PDF_IMPORT")
 
 
 class LiteratureReviewSynthesisTests(SimpleTestCase):

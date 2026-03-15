@@ -20,6 +20,7 @@ from .services.job_queue import enqueue_job
 from .services.metrics import MetricsService
 from .services.synthesis import SynthesisService
 from .services.retrieval import RetrievalService
+from .services.discovery import DiscoveryService
 
 from .router import is_title_question, is_about_paper_question, is_page_count_question
 
@@ -32,6 +33,40 @@ def _documents_using_storage_path(storage_path: str, exclude_document_id: int | 
     if exclude_document_id is not None:
         queryset = queryset.exclude(id=exclude_document_id)
     return queryset
+
+
+def _build_metadata_overview_answer(document: Document) -> dict:
+    title = (document.title or document.filename or "Untitled paper").strip()
+    abstract = (document.abstract or "").strip()
+    source = getattr(document, "paper_source", None)
+    authors = getattr(source, "authors", "") if source else ""
+    published = getattr(source, "published_date", None) if source else None
+
+    lines = [f"{title}"]
+    if authors:
+        lines.append(f"Authors: {authors}")
+    if published:
+        lines.append(f"Published: {published}")
+    if abstract:
+        lines.append("")
+        lines.append(f"Abstract summary: {abstract}")
+    else:
+        lines.append("")
+        lines.append("No abstract is available for this source.")
+
+    lines.append("")
+    lines.append("This answer is based on source metadata because the full PDF was not available.")
+
+    return {
+        "answer": "\n".join(lines),
+        "citations": [],
+        "is_refusal": False,
+        "is_insufficient_evidence": False,
+        "retrieved_chunks_count": 1 if abstract else 0,
+        "confidence_score": 0.55 if abstract else 0.35,
+        "retrieval_ms": 0,
+        "generation_ms": 0,
+    }
 
 
 @api_view(["GET"])
@@ -491,16 +526,22 @@ def ask_question(request):
                             "generation_ms": 0,
                         }
                     elif is_about_paper_question(question_text):
-                        docs = retrieve_paper_overview(
-                            question=question_text,
-                            session_name=session.name,
-                            source=sources[0],
+                        doc = Document.objects.select_related("paper_source").get(
+                            session=session, filename=sources[0]
                         )
-                        result = ask_with_citations(
-                            question=question_text,
-                            session_name=session.name,
-                            docs_override=docs,
-                        )
+                        if doc.error_message and "Summary-only mode" in doc.error_message:
+                            result = _build_metadata_overview_answer(doc)
+                        else:
+                            docs = retrieve_paper_overview(
+                                question=question_text,
+                                session_name=session.name,
+                                source=sources[0],
+                            )
+                            result = ask_with_citations(
+                                question=question_text,
+                                session_name=session.name,
+                                docs_override=docs,
+                            )
                 except Document.DoesNotExist:
                     logger.warning(
                         f"Specialized route failed: Document '{sources[0]}' "
@@ -508,7 +549,17 @@ def ask_question(request):
                         f"Falling back to RAG."
                     )
 
-            # 2. DEFAULT RAG (Fallback or generic question)
+            # 2. NO-CONTEXT DISCOVERY OR ABSTENTION
+            if not result and not sources:
+                discovery_service = DiscoveryService()
+                if discovery_service.should_use_external_discovery(question_text):
+                    result = discovery_service.answer_query_from_external_search(
+                        question_text
+                    )
+                else:
+                    result = discovery_service.build_abstention_response()
+
+            # 3. DEFAULT RAG (Fallback or generic question)
             if not result:
                 result = ask_with_citations(
                     question=question_text,
@@ -534,6 +585,12 @@ def ask_question(request):
                 question=question_obj,
                 text=sanitize_text(result["answer"]),
                 citations=sanitize_json_value(result["citations"]),
+                metadata=sanitize_json_value({
+                    "discovery_mode": result.get("discovery_mode"),
+                    "source_basis": result.get("source_basis"),
+                    "suggested_sources": result.get("suggested_sources", []),
+                    "is_refusal": result.get("is_refusal", False),
+                }),
             )
 
             retrieved_chunks = sanitize_json_value([
@@ -722,12 +779,17 @@ def list_pdfs(request):
             "filename": document.filename,
             "storage_path": document.storage_path,
             "file_url": document.file_url,
+            "uploaded_at": document.uploaded_at,
+            "source_type": getattr(getattr(document, "paper_source", None), "source_type", "manual"),
+            "paper_source_id": getattr(getattr(document, "paper_source", None), "id", None),
+            "external_id": getattr(getattr(document, "paper_source", None), "external_id", ""),
+            "entry_url": getattr(getattr(document, "paper_source", None), "entry_url", ""),
             "title": document.title,
             "abstract": document.abstract,
             "status": document.status,
             "error_message": document.error_message,
         }
-        for document in session.documents.all()
+        for document in session.documents.select_related("paper_source").all()
     ]
 
 
@@ -893,6 +955,12 @@ def get_history(request):
                         item["comparison"] = a.metadata
                     if "title" in a.metadata:
                         item["title"] = a.metadata["title"]
+                    if "suggested_sources" in a.metadata:
+                        item["suggestedSources"] = a.metadata.get("suggested_sources", [])
+                    if "discovery_mode" in a.metadata:
+                        item["discoveryMode"] = a.metadata.get("discovery_mode")
+                    if "source_basis" in a.metadata:
+                        item["sourceBasis"] = a.metadata.get("source_basis")
                 
                 history.append(item)
             except Answer.DoesNotExist:

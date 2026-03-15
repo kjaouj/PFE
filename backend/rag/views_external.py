@@ -11,6 +11,8 @@ from .services.pubmed_service import PubmedService
 from .services.semanticscholar_service import SemanticScholarService
 from .services.acl_service import ACLService
 from .services.medrxiv_service import MedRxivService
+from .services.openalex_service import OpenAlexService
+from .services.europepmc_service import EuropePmcService
 from .services.resilience import CircuitOpenError, TransientExternalError
 
 logger = logging.getLogger(__name__)
@@ -21,7 +23,7 @@ def external_search(request):
     Unified search endpoint.
     Params: 
     - q: Query
-    - source: 'arxiv', 'pubmed', 'semanticscholar', 'acl', or 'medrxiv'
+    - source: 'openalex', 'europepmc', 'arxiv', 'pubmed', 'semanticscholar', 'acl', or 'medrxiv'
     """
     query = request.GET.get('q', '').strip()
     provider = request.GET.get('source', 'arxiv').lower()
@@ -31,7 +33,11 @@ def external_search(request):
         return Response({'error': 'Query parameter "q" is required'}, status=status.HTTP_400_BAD_REQUEST)
 
     try:
-        if provider == 'arxiv':
+        if provider == 'openalex':
+            service = OpenAlexService()
+        elif provider == 'europepmc':
+            service = EuropePmcService()
+        elif provider == 'arxiv':
             service = ArxivService()
         elif provider == 'pubmed':
             service = PubmedService()
@@ -52,6 +58,7 @@ def external_search(request):
         for r in results:
             unified_results.append({
                 'id': r.get('arxiv_id') or r.get('external_id'),
+                'external_id': r.get('external_id'),
                 'title': r.get('title'),
                 'authors': r.get('authors'),
                 'abstract': r.get('abstract'),
@@ -81,7 +88,7 @@ def external_import(request):
     Unified import endpoint.
     Params: 
     - id: Paper ID
-    - source: 'arxiv', 'pubmed', or 'semanticscholar'
+    - source: 'openalex', 'europepmc', 'arxiv', 'pubmed', or 'semanticscholar'
     - session: Session name
     """
     paper_id = request.data.get('id', '').strip()
@@ -105,7 +112,13 @@ def external_import(request):
         return Response({'error': f'Session {session_name} not found'}, status=status.HTTP_404_NOT_FOUND)
 
     try:
-        if provider == 'arxiv':
+        if provider == 'openalex':
+            service = OpenAlexService()
+            result = service.import_paper(work_id=paper_id, session_name=session.name)
+        elif provider == 'europepmc':
+            service = EuropePmcService()
+            result = service.import_paper(paper_id=paper_id, session_name=session.name)
+        elif provider == 'arxiv':
             service = ArxivService()
             result = service.import_paper(arxiv_id=paper_id, session_name=session.name)
         elif provider == 'pubmed':

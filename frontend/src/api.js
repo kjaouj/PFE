@@ -50,9 +50,54 @@ export const api = {
   listPdfs: (session) => request(`/api/pdfs/${toQueryString({ session })}`),
   listMetrics: () => request("/api/metrics/summary/"),
   uploadPdf: (formData) =>
-    request("/api/upload/", {
-      method: "POST",
-      body: formData,
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `${API_BASE}/api/upload/`);
+      xhr.responseType = "text";
+
+      xhr.onload = () => {
+        const text = xhr.responseText || "";
+        let data = null;
+        try {
+          data = text ? JSON.parse(text) : null;
+        } catch {
+          data = text;
+        }
+
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(data);
+          return;
+        }
+
+        const error = new Error((data && data.error) || `Request failed (${xhr.status})`);
+        error.status = xhr.status;
+        error.payload = data;
+        reject(error);
+      };
+
+      xhr.onerror = () => reject(new Error("Upload failed"));
+      xhr.onabort = () => {
+        const error = new Error("Upload canceled");
+        error.aborted = true;
+        reject(error);
+      };
+
+      const onProgress = formData?.__onProgress;
+      if (typeof onProgress === "function") {
+        xhr.upload.onprogress = (event) => {
+          if (!event.lengthComputable) return;
+          onProgress(Math.round((event.loaded / event.total) * 100));
+        };
+      }
+
+      const signal = formData?.__signal;
+      if (signal) {
+        signal.addEventListener("abort", () => xhr.abort(), { once: true });
+      }
+
+      delete formData.__onProgress;
+      delete formData.__signal;
+      xhr.send(formData);
     }),
   ask: (payload) =>
     request("/api/ask/", {
@@ -78,6 +123,8 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     }),
+  getRelatedPapers: ({ documentId, paperId, limit }) =>
+    request(`/api/papers/related/${toQueryString({ document_id: documentId, paper_id: paperId, limit })}`),
   listHighlights: (documentId) =>
     request(`/api/highlights/${toQueryString({ document_id: documentId })}`),
   createHighlight: (payload) =>

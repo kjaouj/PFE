@@ -16,6 +16,7 @@ from .views import (
 from .views_arxiv import arxiv_search, arxiv_import
 from .views_external import external_search, external_import
 from .views_highlights import highlights, delete_highlight, search_highlights
+from .views_discovery import related_papers
 
 urlpatterns = [
     path("ask/", ask_question, name="ask_question"),
@@ -36,6 +37,7 @@ urlpatterns = [
     path("arxiv/import/", arxiv_import, name="arxiv_import"),
     path("search/external/", external_search, name="external_search"),
     path("import/external/", external_import, name="external_import"),
+    path("papers/related/", related_papers, name="related_papers"),
     path("highlights/", highlights, name="highlights"),
     path("highlights/<int:highlight_id>/", delete_highlight, name="delete_highlight"),
     path("highlights/search/", search_highlights, name="search_highlights"),

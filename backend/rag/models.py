@@ -63,6 +63,9 @@ class PaperSource(models.Model):
         ('arxiv', 'arXiv'),
         ('pubmed', 'PubMed'),
         ('doi', 'DOI'),
+        ('openalex', 'OpenAlex'),
+        ('europepmc', 'Europe PMC'),
+        ('core', 'CORE'),
         ('manual', 'Manual Upload'),
         ('acl', 'ACL Anthology'),
         ('medrxiv', 'medRxiv'),
@@ -131,6 +134,7 @@ class IngestionJob(models.Model):
         ("ARXIV_IMPORT", "arXiv Import"),
         ("PUBMED_IMPORT", "PubMed Import"),
         ("SEMANTIC_SCHOLAR_IMPORT", "Semantic Scholar Import"),
+        ("REMOTE_PDF_IMPORT", "Remote PDF Import"),
     ]
 
     job_type = models.CharField(max_length=40, choices=JOB_TYPE_CHOICES)

@@ -7,7 +7,8 @@ from django.test import TestCase
 from langchain_core.documents import Document as LangchainDocument
 from rest_framework.test import APIClient
 
-from rag.models import Document, IngestionJob, Session
+from rag.models import Document, IngestionJob, PaperSource, Session
+from rag.services.ingestion_jobs import IngestionJobRunner
 from rag.services.retrieval import ScoredDocument
 
 
@@ -139,6 +140,57 @@ class ApiFlowTests(TestCase):
         self.assertEqual(response.data["answer"], "Test answer")
         self.assertEqual(len(response.data["citations"]), 1)
         self.assertEqual(response.data["citations"][0]["source"], doc.filename)
+
+    @patch("rag.views.DiscoveryService.answer_query_from_external_search")
+    def test_ask_without_selected_sources_uses_external_discovery_for_specific_query(
+        self,
+        mock_answer_query_from_external_search,
+    ):
+        mock_answer_query_from_external_search.return_value = {
+            "answer": "Abstract-grounded answer.",
+            "citations": [],
+            "is_refusal": False,
+            "is_insufficient_evidence": False,
+            "retrieved_chunks_count": 3,
+            "confidence_score": 0.68,
+            "discovery_mode": "external_search_answer",
+            "source_basis": "abstracts_and_metadata",
+            "suggested_sources": [
+                {"id": "abc123", "title": "Paper A", "provider": "semanticscholar"}
+            ],
+        }
+
+        response = self.client.post(
+            "/api/ask/",
+            {
+                "question": "What do papers say about retrieval-augmented generation for clinical decision support?",
+                "session": self.session_name,
+                "sources": [],
+                "mode": "qa",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["discovery_mode"], "external_search_answer")
+        self.assertEqual(len(response.data["suggested_sources"]), 1)
+        mock_answer_query_from_external_search.assert_called_once()
+
+    def test_ask_without_selected_sources_abstains_for_broad_query(self):
+        response = self.client.post(
+            "/api/ask/",
+            {
+                "question": "What is intelligence?",
+                "session": self.session_name,
+                "sources": [],
+                "mode": "qa",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["is_refusal"])
+        self.assertEqual(response.data["discovery_mode"], "abstain_no_context")
 
     def test_lit_review_requires_two_selected_documents(self):
         session = Session.objects.get(name=self.session_name)
@@ -329,3 +381,172 @@ class ApiFlowTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         mock_delete.assert_called_once_with("pdfs/sample_abcd123.pdf")
+
+    @patch("rag.views_discovery.OpenAlexService.fetch_paper_graph")
+    def test_related_papers_endpoint_uses_openalex_source_when_available(
+        self,
+        mock_fetch_paper_graph,
+    ):
+        session = Session.objects.get(name=self.session_name)
+        doc = Document.objects.create(filename="paper.pdf", session=session, status="INDEXED", title="Paper")
+        PaperSource.objects.create(
+            document=doc,
+            source_type="openalex",
+            external_id="W123",
+            title="Paper",
+            authors="Alice",
+            abstract="Abstract",
+        )
+        mock_fetch_paper_graph.return_value = {
+            "paper": {"id": "W123", "title": "Paper"},
+            "references": [{"id": "ref-1", "title": "Reference"}],
+            "citations": [],
+            "related": [],
+            "graph_source": "openalex",
+        }
+
+        response = self.client.get(f"/api/papers/related/?document_id={doc.id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["paper"]["id"], "W123")
+        self.assertEqual(len(response.data["references"]), 1)
+
+    @patch("rag.views_discovery.DiscoveryService.discover_candidates")
+    @patch("rag.views_discovery.OpenAlexService.resolve_best_match")
+    @patch("rag.views_discovery.OpenAlexService.fetch_paper_graph")
+    def test_related_papers_endpoint_resolves_non_openalex_source_before_fallback(
+        self,
+        mock_fetch_paper_graph,
+        mock_resolve_best_match,
+        mock_discover_candidates,
+    ):
+        session = Session.objects.get(name=self.session_name)
+        doc = Document.objects.create(filename="paper.pdf", session=session, status="INDEXED", title="Paper")
+        PaperSource.objects.create(
+            document=doc,
+            source_type="arxiv",
+            external_id="2603.12254v1",
+            title="Paper",
+            authors="Alice",
+            abstract="Abstract",
+        )
+        mock_resolve_best_match.return_value = {"external_id": "W999"}
+        mock_fetch_paper_graph.return_value = {
+            "paper": {"id": "W999", "title": "Paper"},
+            "references": [],
+            "citations": [],
+            "related": [{"id": "2603.12254v1", "provider": "arxiv", "title": "Related"}],
+            "graph_source": "openalex",
+        }
+
+        response = self.client.get(f"/api/papers/related/?document_id={doc.id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["paper"]["id"], "W999")
+        mock_discover_candidates.assert_not_called()
+
+    @patch("rag.views_discovery.DiscoveryService.discover_candidates")
+    @patch("rag.views_discovery.OpenAlexService.resolve_best_match")
+    def test_related_papers_endpoint_uses_multi_provider_fallback_when_no_graph_seed_found(
+        self,
+        mock_resolve_best_match,
+        mock_discover_candidates,
+    ):
+        session = Session.objects.get(name=self.session_name)
+        doc = Document.objects.create(filename="paper.pdf", session=session, status="INDEXED", title="RAG paper")
+        PaperSource.objects.create(
+            document=doc,
+            source_type="manual",
+            external_id="manual-1",
+            title="RAG paper",
+            authors="Alice",
+            abstract="Abstract",
+        )
+        mock_resolve_best_match.return_value = {}
+        mock_discover_candidates.return_value = [
+            {"id": "2603.12254v1", "provider": "arxiv", "title": "Related"}
+        ]
+
+        response = self.client.get(f"/api/papers/related/?document_id={doc.id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["graph_source"], "multi_provider_fallback")
+        self.assertEqual(len(response.data["related"]), 1)
+
+    def test_about_paper_question_uses_metadata_overview_for_summary_only_source(self):
+        session = Session.objects.get(name=self.session_name)
+        doc = Document.objects.create(
+            filename="summary_only_abstract.txt",
+            session=session,
+            status="INDEXED",
+            title="Summary Only Paper",
+            abstract="This paper studies retrieval-augmented generation for clinical settings.",
+            error_message="Note: Full PDF was unavailable. Summary-only mode.",
+        )
+        PaperSource.objects.create(
+            document=doc,
+            source_type="openalex",
+            external_id="W123",
+            title=doc.title,
+            authors="Alice, Bob",
+            abstract=doc.abstract,
+        )
+
+        response = self.client.post(
+            "/api/ask/",
+            {
+                "question": "what's this paper about?",
+                "session": self.session_name,
+                "sources": [doc.filename],
+                "mode": "qa",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Summary Only Paper", response.data["answer"])
+        self.assertIn("source metadata", response.data["answer"])
+        self.assertFalse(response.data["is_refusal"])
+
+    @patch("rag.services.ingestion_jobs.requests.get")
+    def test_remote_pdf_import_rejects_html_landing_page_and_falls_back_to_summary(
+        self,
+        mock_get,
+    ):
+        session = Session.objects.get(name=self.session_name)
+        doc = Document.objects.create(
+            filename="openalex_W123.pdf",
+            storage_path="pdfs/openalex_W123.pdf",
+            session=session,
+            status="QUEUED",
+            title="Paper",
+            abstract="Abstract",
+        )
+        source = PaperSource.objects.create(
+            document=doc,
+            source_type="openalex",
+            external_id="W123",
+            title="Paper",
+            authors="Alice",
+            abstract="Abstract",
+            pdf_url="https://example.org/landing-page",
+            entry_url="https://example.org/landing-page",
+        )
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.headers = {"Content-Type": "text/html"}
+        response.iter_content.return_value = iter([b"<html>not a pdf</html>"])
+        mock_get.return_value = response
+
+        runner = IngestionJobRunner()
+        runner._run_remote_pdf_import(
+            document_id=doc.id,
+            paper_source_id=source.id,
+            metadata={"title": "Paper", "abstract": "Abstract", "authors": ["Alice"]},
+            pdf_url="https://example.org/landing-page",
+            storage_path="pdfs/openalex_W123.pdf",
+        )
+
+        doc.refresh_from_db()
+        self.assertEqual(doc.status, "INDEXED")
+        self.assertIn("Summary-only mode", doc.error_message)

@@ -80,6 +80,36 @@ class SemanticScholarService:
         data = self._safe_request(url, params)
         return self._extract_metadata(data)
 
+    def fetch_paper_graph(self, paper_id: str, limit: int = 6) -> Dict:
+        url = f"{self.BASE_URL}/paper/{paper_id}"
+        params = {
+            "fields": (
+                "paperId,title,authors,abstract,url,year,externalIds,openAccessPdf,"
+                "references.paperId,references.title,references.authors,references.year,references.url,references.abstract,"
+                "citations.paperId,citations.title,citations.authors,citations.year,citations.url,citations.abstract"
+            )
+        }
+        data = self._safe_request(url, params)
+        paper = self._extract_metadata(data)
+        references = self._extract_graph_items(data.get("references", []), relationship="reference")[:limit]
+        citations = self._extract_graph_items(data.get("citations", []), relationship="citation")[:limit]
+        related = self._derive_related_papers(paper_id, paper.get("title", ""), limit=limit)
+        return {
+            "paper": {
+                "id": paper.get("external_id"),
+                "title": paper.get("title"),
+                "authors": paper.get("authors", []),
+                "year": paper.get("published_date"),
+                "url": paper.get("entry_url"),
+                "abstract": paper.get("abstract"),
+                "provider": paper.get("source_type", "semanticscholar"),
+            },
+            "references": references,
+            "citations": citations,
+            "related": related,
+            "graph_source": "semanticscholar",
+        }
+
     def import_paper(self, paper_id: str, session_name: str, source_type: str = 'doi') -> Dict:
         """Import from Semantic Scholar with PDF fallback to Abstract."""
         from rag.models import Session, Document, PaperSource
@@ -189,4 +219,53 @@ class SemanticScholarService:
             "pdf_url": pdf_url,
             "source_type": "semanticscholar"
         }
+
+    def _extract_graph_items(self, entries: List[Dict], relationship: str) -> List[Dict]:
+        items = []
+        for entry in entries or []:
+            node = (
+                entry.get("citedPaper")
+                or entry.get("citingPaper")
+                or entry.get("referencedPaper")
+                or entry
+            )
+            metadata = self._extract_metadata(node)
+            if not metadata.get("external_id") or not metadata.get("title"):
+                continue
+            items.append(
+                {
+                    "id": metadata.get("external_id"),
+                    "title": metadata.get("title"),
+                    "authors": metadata.get("authors", []),
+                    "year": metadata.get("published_date"),
+                    "url": metadata.get("entry_url"),
+                    "abstract": metadata.get("abstract"),
+                    "provider": metadata.get("source_type", "semanticscholar"),
+                    "relationship": relationship,
+                }
+            )
+        return items
+
+    def _derive_related_papers(self, paper_id: str, title: str, limit: int = 6) -> List[Dict]:
+        if not title:
+            return []
+        related = []
+        for item in self.search(title, max_results=limit + 3):
+            if item.get("external_id") == paper_id:
+                continue
+            related.append(
+                {
+                    "id": item.get("external_id"),
+                    "title": item.get("title"),
+                    "authors": item.get("authors", []),
+                    "year": item.get("published_date"),
+                    "url": item.get("entry_url"),
+                    "abstract": item.get("abstract"),
+                    "provider": item.get("source_type", "semanticscholar"),
+                    "relationship": "related_search",
+                }
+            )
+            if len(related) >= limit:
+                break
+        return related
 

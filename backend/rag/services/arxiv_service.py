@@ -181,8 +181,10 @@ class ArxivService:
 
     def _extract_metadata(self, paper: arxiv.Result) -> Dict:
         """Helper to convert arXiv Result into a dict."""
+        arxiv_id = paper.get_short_id()
         return {
-            "arxiv_id": paper.get_short_id(),
+            "arxiv_id": arxiv_id,
+            "external_id": arxiv_id,
             "title": paper.title,
             "authors": [a.name for a in paper.authors],
             "abstract": paper.summary,
@@ -190,7 +192,8 @@ class ArxivService:
             "pdf_url": paper.pdf_url,
             "entry_url": paper.entry_id,  # entry_id is the canonical URL in the library
             "categories": paper.categories,
-            "primary_category": paper.primary_category
+            "primary_category": paper.primary_category,
+            "source_type": "arxiv",
         }
 
 from datetime import datetime

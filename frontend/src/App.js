@@ -5,8 +5,8 @@ import { api, API_BASE } from "./api";
 const MODE_CONFIG = {
   qa: {
     label: "QA",
-    description: "Best for precise answers grounded in one or more selected papers.",
-    minSources: 1,
+    description: "Best for grounded answers on selected papers, or topic discovery when no source is selected.",
+    minSources: 0,
   },
   compare: {
     label: "Compare",
@@ -89,12 +89,21 @@ function App() {
   const [isPdfDrawerFullscreen, setIsPdfDrawerFullscreen] = useState(false);
   const [externalLoading, setExternalLoading] = useState(false);
   const [externalError, setExternalError] = useState("");
+  const [uploadQueue, setUploadQueue] = useState([]);
+  const [isDragActive, setIsDragActive] = useState(false);
+  const [sourceSearch, setSourceSearch] = useState("");
+  const [sourceFilter, setSourceFilter] = useState("all");
+  const [sourceSort, setSourceSort] = useState("recent");
+  const [relatedPanel, setRelatedPanel] = useState(null);
+  const [relatedLoading, setRelatedLoading] = useState(false);
   const fileInputRef = useRef(null);
   const chatEndRef = useRef(null);
   const distinctSelectedCount = new Set(selectedPdfs).size;
   const activeModeConfig = MODE_CONFIG[mode];
 
   const externalSources = [
+    { id: "openalex", label: "OpenAlex", hint: "Broad scholarly discovery with citation graph coverage" },
+    { id: "europepmc", label: "Europe PMC", hint: "Biomedical literature with strong open-access coverage" },
     { id: "arxiv", label: "arXiv", hint: "Computer science, physics and math preprints" },
     { id: "pubmed", label: "PubMed", hint: "Biomedical and life-science publications" },
     { id: "semanticscholar", label: "Semantic Scholar", hint: "Citation graph and broad metadata search" },
@@ -387,15 +396,48 @@ function App() {
   };
 
   const [arxivQuery, setArxivQuery] = useState("");
-  const [searchSource, setSearchSource] = useState("arxiv"); // New: arxiv, pubmed, semanticscholar
+  const [searchSource, setSearchSource] = useState("openalex");
   const [arxivResults, setArxivResults] = useState([]);
   const [isArxivOpen, setIsArxivOpen] = useState(false);
   const [previewId, setPreviewId] = useState(null);
   const activeExternalSource = externalSources.find((src) => src.id === searchSource) || externalSources[0];
 
+  const visiblePdfs = [...pdfs]
+    .filter((pdf) => {
+      const search = sourceSearch.trim().toLowerCase();
+      const title = (pdf.title || "").toLowerCase();
+      const filename = (pdf.filename || "").toLowerCase();
+      const sourceType = (pdf.source_type || "manual").toLowerCase();
+      const matchesSearch = !search || title.includes(search) || filename.includes(search) || sourceType.includes(search);
+
+      if (!matchesSearch) return false;
+      if (sourceFilter === "all") return true;
+      if (sourceFilter === "summary") return Boolean(pdf.error_message?.includes("Summary-only"));
+      if (sourceFilter === "external") return (pdf.source_type || "manual") !== "manual";
+      return (pdf.status || "").toLowerCase() === sourceFilter;
+    })
+    .sort((a, b) => {
+      if (sourceSort === "title") {
+        return (a.title || a.filename).localeCompare(b.title || b.filename);
+      }
+      if (sourceSort === "status") {
+        return (a.status || "").localeCompare(b.status || "");
+      }
+      if (sourceSort === "source") {
+        return (a.source_type || "manual").localeCompare(b.source_type || "manual");
+      }
+      return new Date(b.uploaded_at || 0) - new Date(a.uploaded_at || 0);
+    });
+
+  const queueSummary = {
+    active: uploadQueue.filter((item) => item.status === "queued" || item.status === "uploading").length,
+    failed: uploadQueue.filter((item) => item.status === "failed").length,
+    completed: uploadQueue.filter((item) => item.status === "completed").length,
+  };
+
   // Poll for processing PDFs
   useEffect(() => {
-    const processingPdfs = pdfs.filter(p => p.status === 'UPLOADED' || p.status === 'PROCESSING');
+    const processingPdfs = pdfs.filter(p => p.status === 'QUEUED' || p.status === 'UPLOADED' || p.status === 'PROCESSING');
     if (processingPdfs.length > 0) {
       const interval = setInterval(() => {
         loadPdfs();
@@ -404,26 +446,111 @@ function App() {
     }
   }, [pdfs]);
 
-  const handleFileUpload = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
+  useEffect(() => {
+    const activeUpload = uploadQueue.find((item) => item.status === "uploading");
+    if (activeUpload) return;
+
+    const nextUpload = uploadQueue.find((item) => item.status === "queued");
+    if (!nextUpload) return;
+
+    const controller = new AbortController();
+    setUploadQueue((prev) =>
+      prev.map((item) =>
+        item.id === nextUpload.id
+          ? { ...item, status: "uploading", controller, progress: item.progress || 0 }
+          : item
+      )
+    );
+    setStatus(`Uploading ${nextUpload.file.name}...`);
 
     const formData = new FormData();
-    formData.append("file", file);
-    formData.append("session", session);
+    formData.append("file", nextUpload.file);
+    formData.append("session", nextUpload.session);
+    formData.__onProgress = (progress) => {
+      setUploadQueue((prev) =>
+        prev.map((item) => (item.id === nextUpload.id ? { ...item, progress } : item))
+      );
+    };
+    formData.__signal = controller.signal;
 
-    setStatus("Uploading...");
-    setLoading(true);
+    api.uploadPdf(formData)
+      .then((data) => {
+        setUploadQueue((prev) =>
+          prev.map((item) =>
+            item.id === nextUpload.id
+              ? { ...item, status: "completed", progress: 100, controller: null, response: data }
+              : item
+          )
+        );
+        setStatus(data?.message || `${nextUpload.file.name} queued for ingestion`);
+        loadPdfs();
+      })
+      .catch((err) => {
+        setUploadQueue((prev) =>
+          prev.map((item) =>
+            item.id === nextUpload.id
+              ? {
+                  ...item,
+                  status: err?.aborted ? "canceled" : "failed",
+                  controller: null,
+                  error: err?.message || "Upload failed",
+                }
+              : item
+          )
+        );
+        setStatus(err?.aborted ? `Canceled ${nextUpload.file.name}` : `Upload failed for ${nextUpload.file.name}`);
+      });
+  }, [uploadQueue]);
 
-    try {
-      const data = await api.uploadPdf(formData);
-      setStatus(data?.message || "Upload initiated");
-      loadPdfs();
-    } catch (err) {
-      setStatus("Upload failed");
-    } finally {
-      setLoading(false);
-    }
+  const enqueueFiles = (files) => {
+    const incoming = Array.from(files || []);
+    if (incoming.length === 0) return;
+
+    const queuedItems = incoming.map((file) => ({
+      id: `${file.name}-${file.size}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      file,
+      session,
+      progress: 0,
+      status: file.name.toLowerCase().endsWith(".pdf") ? "queued" : "failed",
+      error: file.name.toLowerCase().endsWith(".pdf") ? "" : "Only PDF files are allowed",
+      controller: null,
+    }));
+
+    setUploadQueue((prev) => [...queuedItems, ...prev].slice(0, 20));
+    const validCount = queuedItems.filter((item) => item.status === "queued").length;
+    setStatus(validCount > 0 ? `Queued ${validCount} file${validCount > 1 ? "s" : ""} for upload` : "Only PDF files can be uploaded");
+  };
+
+  const handleFileUpload = async (e) => {
+    enqueueFiles(e.target.files);
+    e.target.value = "";
+  };
+
+  const retryQueuedUpload = (entryId) => {
+    setUploadQueue((prev) =>
+      prev.map((item) =>
+        item.id === entryId
+          ? { ...item, status: "queued", progress: 0, error: "", controller: null }
+          : item
+      )
+    );
+  };
+
+  const cancelQueuedUpload = (entryId) => {
+    setUploadQueue((prev) =>
+      prev.map((item) => {
+        if (item.id !== entryId) return item;
+        if (item.status === "uploading" && item.controller) {
+          item.controller.abort();
+          return { ...item };
+        }
+        return { ...item, status: "canceled", controller: null };
+      })
+    );
+  };
+
+  const removeQueuedUpload = (entryId) => {
+    setUploadQueue((prev) => prev.filter((item) => item.id !== entryId));
   };
 
   const searchExternal = async (e) => {
@@ -449,14 +576,33 @@ function App() {
     }
   };
 
-  const importExternal = async (id) => {
-    setStatus(`Importing from ${searchSource.toUpperCase()}...`);
+  const importExternal = async (id, provider = searchSource) => {
+    setStatus(`Importing from ${provider.toUpperCase()}...`);
     try {
-      await api.importExternal({ id, source: searchSource, session });
+      await api.importExternal({ id, source: provider, session });
       setStatus("Import initiated");
       loadPdfs();
     } catch (err) {
       setStatus("Import failed: " + (err?.message || "Unknown"));
+    }
+  };
+
+  const loadRelatedPapers = async (pdf) => {
+    setRelatedLoading(true);
+    setStatus(`Discovering related papers for ${pdf.title || pdf.filename}...`);
+    try {
+      const data = await api.getRelatedPapers({ documentId: pdf.id, limit: 6 });
+      setRelatedPanel({
+        documentId: pdf.id,
+        filename: pdf.filename,
+        title: pdf.title || pdf.filename,
+        ...data,
+      });
+      setStatus("Related papers loaded");
+    } catch (err) {
+      setStatus(err?.message || "Related paper discovery failed");
+    } finally {
+      setRelatedLoading(false);
     }
   };
 
@@ -504,7 +650,10 @@ function App() {
         setMessages(prev => [...prev, {
           role: "assistant",
           text: data.answer,
-          citations: data.citations || []
+          citations: data.citations || [],
+          suggestedSources: data.suggested_sources || [],
+          discoveryMode: data.discovery_mode || "",
+          sourceBasis: data.source_basis || "",
         }]);
       }
       setStatus("Ready");
@@ -556,6 +705,22 @@ function App() {
     } catch (err) {
       setStatus(err?.message || "Retry failed");
     }
+  };
+
+  const handleUploadDragOver = (e) => {
+    e.preventDefault();
+    setIsDragActive(true);
+  };
+
+  const handleUploadDragLeave = (e) => {
+    e.preventDefault();
+    setIsDragActive(false);
+  };
+
+  const handleUploadDrop = (e) => {
+    e.preventDefault();
+    setIsDragActive(false);
+    enqueueFiles(e.dataTransfer.files);
   };
 
   return (
@@ -692,7 +857,7 @@ function App() {
                               className="mini-btn"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                importExternal(res.id);
+                                importExternal(res.id, res.provider || searchSource);
                               }}
                             >
                               Import
@@ -708,31 +873,100 @@ function App() {
 
             <div className="section-header">
               <span className="section-label">Sources ({pdfs.length})</span>
-              {pdfs.length > 0 && (
+              {visiblePdfs.length > 0 && (
                 <button
                   className="text-btn"
                   onClick={() => setSelectedPdfs(
-                    selectedPdfs.length === pdfs.length ? [] : pdfs.map(p => p.filename)
+                    selectedPdfs.length === visiblePdfs.length ? [] : visiblePdfs.map(p => p.filename)
                   )}
                 >
-                  {selectedPdfs.length === pdfs.length ? 'Deselect All' : 'Select All'}
+                  {selectedPdfs.length === visiblePdfs.length ? 'Deselect All' : 'Select All'}
                 </button>
               )}
             </div>
 
-            <div className="upload-zone" onClick={() => fileInputRef.current.click()}>
-              <p>+ Add Document</p>
+            <div
+              className={`upload-zone ${isDragActive ? "drag-active" : ""}`}
+              onClick={() => fileInputRef.current.click()}
+              onDragOver={handleUploadDragOver}
+              onDragLeave={handleUploadDragLeave}
+              onDrop={handleUploadDrop}
+            >
+              <p>{isDragActive ? "Drop PDFs to queue them" : "+ Add Documents"}</p>
+              <span className="upload-zone-subtitle">Batch upload, drag and drop, or click to browse.</span>
               <input
                 type="file"
                 className="hide-input"
                 ref={fileInputRef}
                 onChange={handleFileUpload}
                 accept=".pdf"
+                multiple
               />
             </div>
 
+            {uploadQueue.length > 0 && (
+              <div className="upload-queue-panel">
+                <div className="upload-queue-header">
+                  <strong>Upload Queue</strong>
+                  <span className="muted">
+                    {queueSummary.active} active, {queueSummary.failed} failed, {queueSummary.completed} done
+                  </span>
+                </div>
+                <div className="upload-queue-list">
+                  {uploadQueue.map((item) => (
+                    <div key={item.id} className={`upload-queue-item ${item.status}`}>
+                      <div className="upload-queue-meta">
+                        <span className="upload-queue-name" title={item.file.name}>{item.file.name}</span>
+                        <span className="upload-queue-state">{item.status}{item.error ? ` - ${item.error}` : ""}</span>
+                      </div>
+                      <div className="upload-progress-track">
+                        <div className="upload-progress-fill" style={{ width: `${item.progress || 0}%` }} />
+                      </div>
+                      <div className="upload-queue-actions">
+                        {(item.status === "queued" || item.status === "uploading") && (
+                          <button className="text-btn" onClick={() => cancelQueuedUpload(item.id)}>Cancel</button>
+                        )}
+                        {(item.status === "failed" || item.status === "canceled") && (
+                          <button className="text-btn" onClick={() => retryQueuedUpload(item.id)}>Retry</button>
+                        )}
+                        {(item.status === "completed" || item.status === "failed" || item.status === "canceled") && (
+                          <button className="text-btn" onClick={() => removeQueuedUpload(item.id)}>Clear</button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="source-toolbar">
+              <input
+                type="text"
+                value={sourceSearch}
+                onChange={(e) => setSourceSearch(e.target.value)}
+                placeholder="Search title, filename, or source..."
+              />
+              <div className="source-toolbar-row">
+                <select value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
+                  <option value="all">All statuses</option>
+                  <option value="indexed">Indexed</option>
+                  <option value="queued">Queued</option>
+                  <option value="processing">Processing</option>
+                  <option value="failed">Failed</option>
+                  <option value="summary">Summary-only</option>
+                  <option value="external">External imports</option>
+                </select>
+                <select value={sourceSort} onChange={(e) => setSourceSort(e.target.value)}>
+                  <option value="recent">Newest first</option>
+                  <option value="title">Title A-Z</option>
+                  <option value="status">Status</option>
+                  <option value="source">Source type</option>
+                </select>
+              </div>
+            </div>
+
             <div className="source-list">
-              {pdfs.map((pdf, i) => {
+              {visiblePdfs.map((pdf, i) => {
                 const isReady = !pdf.status || pdf.status === 'INDEXED';
                 return (
                   <div
@@ -754,9 +988,21 @@ function App() {
                         {pdf.filename} - <span className={`status-badge ${(pdf.error_message?.includes('Summary-only') ? 'summary' : (pdf.status || 'INDEXED').toLowerCase())}`}>
                           {pdf.error_message?.includes('Summary-only') ? 'SUMMARY' : (pdf.status || 'INDEXED')}
                         </span>
+                        <span className="source-origin">{pdf.source_type || "manual"}</span>
                       </span>
                     </div>
                     <div className="source-actions">
+                      <button
+                        className="discover-source-btn"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          loadRelatedPapers(pdf);
+                        }}
+                        title="Discover related papers"
+                        disabled={relatedLoading}
+                      >
+                        Discover
+                      </button>
                       {pdf.status === "FAILED" && (
                         <button
                           className="retry-source-btn"
@@ -777,12 +1023,60 @@ function App() {
                   </div>
                 );
               })}
-              {pdfs.length === 0 && (
+              {visiblePdfs.length === 0 && (
                 <p className="muted" style={{ textAlign: 'center', fontSize: '0.8rem' }}>
-                  No documents in this session.
+                  {pdfs.length === 0 ? "No documents in this session." : "No documents match the current filters."}
                 </p>
               )}
             </div>
+            {relatedPanel && (
+              <div className="related-panel">
+                <div className="section-header">
+                  <span className="section-label">Related Papers</span>
+                  <button className="text-btn" onClick={() => setRelatedPanel(null)}>Close</button>
+                </div>
+                <p className="external-source-hint">
+                  {relatedPanel.title} · {relatedPanel.graph_source === "semanticscholar" ? "citation graph" : "title-based discovery fallback"}
+                </p>
+                {["references", "citations", "related"].map((group) => (
+                  <div key={group} className="related-group">
+                    <h4>{group.charAt(0).toUpperCase() + group.slice(1)}</h4>
+                    {(relatedPanel[group] || []).length === 0 ? (
+                      <p className="muted">No items in this section.</p>
+                    ) : (
+                      (relatedPanel[group] || []).map((item) => (
+                        <div key={`${group}-${item.id}`} className="related-item">
+                          <div className="related-item-copy">
+                            <strong>{item.title}</strong>
+                            <p>{(item.authors || []).slice(0, 4).join(", ") || "Unknown authors"}</p>
+                            <p className="muted">{item.year || "n/a"}</p>
+                          </div>
+                          <div className="arxiv-actions">
+                            {item.url && (
+                              <a
+                                href={item.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="arxiv-link-btn"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                Open
+                              </a>
+                            )}
+                            <button
+                              className="mini-btn"
+                              onClick={() => importExternal(item.id, item.provider || "semanticscholar")}
+                            >
+                              Import
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </aside>}
@@ -809,21 +1103,23 @@ function App() {
             </button>
           ))}
         </div>
-        {status && <div className="status-indicator">{status}</div>}
         <div className="workspace-summary">
           <span className="summary-chip"><strong>Session:</strong> {session || "None"}</span>
           <span className="summary-chip"><strong>Selected Sources:</strong> {selectedPdfs.length}</span>
           <span className="summary-chip"><strong>Total Sources:</strong> {pdfs.length}</span>
           {mode !== "monitoring" && <span className="summary-chip"><strong>Mode:</strong> {activeModeConfig.label}</span>}
         </div>
-        {mode !== "monitoring" && (
-          <div className="status-indicator" style={{ marginTop: "10px" }}>
-            <strong>{activeModeConfig.label}:</strong> {activeModeConfig.description}
-            {activeModeConfig.minSources > 1 && (
-              <span> Select at least {activeModeConfig.minSources} papers.</span>
-            )}
-          </div>
-        )}
+        <div className="workspace-notices">
+          {status && <div className="status-indicator">{status}</div>}
+          {mode !== "monitoring" && (
+            <div className="mode-explainer">
+              <strong>{activeModeConfig.label}:</strong> {activeModeConfig.description}
+              {activeModeConfig.minSources > 1 && (
+                <span> Select at least {activeModeConfig.minSources} papers.</span>
+              )}
+            </div>
+          )}
+        </div>
 
         {mode !== "monitoring" && (
           <div className="global-highlight-search">
@@ -952,6 +1248,47 @@ function App() {
                     <div className="formatted-text">
                       {msg.text.split('\n').map((line, lidx) => (
                         <p key={lidx}>{line}</p>
+                      ))}
+                    </div>
+                  )}
+
+                  {msg.discoveryMode && (
+                    <p className="message-mode-note">
+                      {msg.discoveryMode.startsWith("external_search_answer")
+                        ? `Answered from external paper discovery${msg.sourceBasis ? ` (${msg.sourceBasis.replace(/_/g, " ")})` : ""}.`
+                        : msg.discoveryMode === "external_search_unavailable"
+                          ? "External paper providers were temporarily unavailable or rate-limited."
+                        : "No local context was selected, so the assistant abstained."}
+                    </p>
+                  )}
+
+                  {msg.suggestedSources && msg.suggestedSources.length > 0 && (
+                    <div className="suggested-sources">
+                      {msg.suggestedSources.map((paper) => (
+                        <div key={paper.id} className="suggested-paper">
+                          <div>
+                            <strong>{paper.title}</strong>
+                            <p>{(paper.authors || []).slice(0, 4).join(", ") || "Unknown authors"}</p>
+                          </div>
+                          <div className="arxiv-actions">
+                            {paper.url && (
+                              <a
+                                href={paper.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="arxiv-link-btn"
+                              >
+                                Open
+                              </a>
+                            )}
+                            <button
+                              className="mini-btn"
+                              onClick={() => importExternal(paper.id, paper.provider || "semanticscholar")}
+                            >
+                              Import
+                            </button>
+                          </div>
+                        </div>
                       ))}
                     </div>
                   )}
@@ -1111,7 +1448,8 @@ function App() {
 
         {mode !== 'monitoring' && (
           <div className="input-area">
-            <form onSubmit={askQuestion} className="chat-input-wrapper">
+            {loading && <div className="thinking-banner">Model is thinking. The question bar is temporarily locked.</div>}
+            <form onSubmit={askQuestion} className={`chat-input-wrapper ${loading ? "blocked" : ""}`}>
               <input
                 type="text"
                 placeholder={
