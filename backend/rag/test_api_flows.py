@@ -508,10 +508,12 @@ class ApiFlowTests(TestCase):
         self.assertIn("source metadata", response.data["answer"])
         self.assertFalse(response.data["is_refusal"])
 
+    @patch("rag.services.ingestion_jobs.IngestionService.ingest_metadata_only")
     @patch("rag.services.ingestion_jobs.requests.get")
     def test_remote_pdf_import_rejects_html_landing_page_and_falls_back_to_summary(
         self,
         mock_get,
+        mock_ingest_metadata_only,
     ):
         session = Session.objects.get(name=self.session_name)
         doc = Document.objects.create(
@@ -537,6 +539,16 @@ class ApiFlowTests(TestCase):
         response.headers = {"Content-Type": "text/html"}
         response.iter_content.return_value = iter([b"<html>not a pdf</html>"])
         mock_get.return_value = response
+        def _fake_ingest_metadata_only(document_id, title, abstract, authors):
+            fallback_doc = Document.objects.get(id=document_id)
+            fallback_doc.status = "INDEXED"
+            fallback_doc.title = title
+            fallback_doc.abstract = abstract
+            fallback_doc.error_message = "Note: Full PDF was unavailable. Summary-only mode."
+            fallback_doc.save(update_fields=["status", "title", "abstract", "error_message"])
+            return {"status": "success", "virtual": True}
+
+        mock_ingest_metadata_only.side_effect = _fake_ingest_metadata_only
 
         runner = IngestionJobRunner()
         runner._run_remote_pdf_import(
