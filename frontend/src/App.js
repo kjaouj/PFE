@@ -159,6 +159,9 @@ function App() {
   const [highlightSearchResults, setHighlightSearchResults] = useState([]);
   const [highlightSearchLoading, setHighlightSearchLoading] = useState(false);
   const [isHighlightSearchOpen, setIsHighlightSearchOpen] = useState(false);
+  const [highlightPanelView, setHighlightPanelView] = useState("search");
+  const [allHighlights, setAllHighlights] = useState([]);
+  const [allHighlightsLoading, setAllHighlightsLoading] = useState(false);
   const [pdfDrawerWidth, setPdfDrawerWidth] = useState(() => {
     try {
       const raw = localStorage.getItem("pdfDrawerWidth");
@@ -186,10 +189,45 @@ function App() {
   const [selectedCitationTags, setSelectedCitationTags] = useState("");
   const fileInputRef = useRef(null);
   const chatEndRef = useRef(null);
+  const selectableTextRef = useRef(null);
   const sidebarResizeStartRef = useRef({ x: 0, width: DEFAULT_SIDEBAR_WIDTH });
   const pdfDrawerResizeStartRef = useRef({ x: 0, width: DEFAULT_PDF_DRAWER_WIDTH });
   const distinctSelectedCount = new Set(selectedPdfs).size;
   const activeModeConfig = MODE_CONFIG[mode];
+  const totalQueries = metrics?.queries?.total || 0;
+  const queryModeEntries = Object.entries(metrics?.queries?.by_mode || {}).sort((a, b) => b[1] - a[1]);
+  const latencyTotal =
+    (metrics?.queries?.retrieval_avg_ms || 0) +
+    (metrics?.queries?.generation_avg_ms || 0) +
+    (metrics?.queries?.orchestration_avg_ms || 0);
+  const latencyBreakdown = [
+    { label: "Retrieval", value: metrics?.queries?.retrieval_avg_ms || 0, tone: "retrieval" },
+    { label: "Generation", value: metrics?.queries?.generation_avg_ms || 0, tone: "generation" },
+    { label: "Orchestration", value: metrics?.queries?.orchestration_avg_ms || 0, tone: "orchestration" },
+  ];
+  const topErrors = metrics?.errors?.top_errors || [];
+  const groundedAnswerRate = Math.max(
+    0,
+    100 - ((metrics?.grounding?.insufficient_evidence_rate || 0) * 100) - ((metrics?.grounding?.refusal_rate || 0) * 100)
+  );
+  const healthScore = Math.max(
+    0,
+    Math.min(
+      100,
+      Math.round(
+        100 -
+        ((metrics?.errors?.rate || 0) * 42) -
+        ((metrics?.grounding?.refusal_rate || 0) * 28) -
+        ((metrics?.grounding?.insufficient_evidence_rate || 0) * 20) +
+        ((metrics?.grounding?.avg_confidence_score || 0) * 18)
+      )
+    )
+  );
+  const formatMetricMs = (value) => {
+    if (!value) return "0ms";
+    if (value >= 1000) return `${(value / 1000).toFixed(1)}s`;
+    return `${value}ms`;
+  };
 
   const externalSources = [
     { id: "openalex", label: "OpenAlex", hint: "Broad scholarly discovery with citation graph coverage" },
@@ -326,6 +364,11 @@ function App() {
 
     return () => clearTimeout(timer);
   }, [highlightSearch, session]);
+
+  useEffect(() => {
+    if (!isHighlightSearchOpen || highlightPanelView !== "saved" || !session) return;
+    loadSessionHighlights();
+  }, [isHighlightSearchOpen, highlightPanelView, session]);
 
   const loadSessions = async () => {
     try {
@@ -469,13 +512,15 @@ function App() {
     return `${citation?.source || citation?.filename || "unknown"}::${page}::${(citation?.snippet || "").slice(0, 120)}`;
   };
 
-  const openCitationViewer = async (citation) => {
-    const filename = citation.source;
-    const page = citation.pageOneIndexed
-      ? Number(citation.page || 1)
-      : Number(citation.page || 0) + 1;
-    const snippet = (citation.snippet || "").trim();
+  const buildPdfViewerUrl = ({ docUrl, page, snippet, precisePhrase, shouldUsePdfViewer }) => {
+    if (!shouldUsePdfViewer) return "";
+    const searchQuery = precisePhrase || chooseFallbackSearch(snippet);
+    const usePhraseMatch = Boolean(precisePhrase);
+    return `https://mozilla.github.io/pdf.js/web/viewer.html?file=${encodeURIComponent(docUrl)}#page=${page}${searchQuery ? `&search=${encodeURIComponent(searchQuery)}${usePhraseMatch ? "&phrase=true" : ""}` : ""}`;
+  };
 
+  const loadViewerForSource = async ({ filename, page = 1, snippet = "", startOffset = null, endOffset = null }) => {
+    const cleanSnippet = (snippet || "").trim();
     let precisePhrase = "";
     let textPreview = "";
     let contentType = "pdf";
@@ -489,35 +534,114 @@ function App() {
         const payload = await api.getDocumentPageText(doc.id, page);
         textPreview = payload?.text || "";
         contentType = payload?.content_type || "pdf";
-        precisePhrase = choosePrecisePhrase(snippet, payload?.text || "");
+        precisePhrase = cleanSnippet ? choosePrecisePhrase(cleanSnippet, payload?.text || "") : "";
       } catch (err) {
         console.error("Failed fetching page text for precise highlight", err);
       }
     }
 
-    const searchQuery = precisePhrase || chooseFallbackSearch(snippet);
-    const usePhraseMatch = Boolean(precisePhrase);
     const shouldUsePdfViewer = isPdfFilename && !isSummaryOnly && contentType === "pdf";
-    const viewerUrl = shouldUsePdfViewer
-      ? `https://mozilla.github.io/pdf.js/web/viewer.html?file=${encodeURIComponent(docUrl)}#page=${page}${searchQuery ? `&search=${encodeURIComponent(searchQuery)}${usePhraseMatch ? "&phrase=true" : ""}` : ""}`
-      : "";
+    const viewerUrl = buildPdfViewerUrl({
+      docUrl,
+      page,
+      snippet: cleanSnippet,
+      precisePhrase,
+      shouldUsePdfViewer,
+    });
 
     setPdfViewer({
       filename,
       page,
-      snippet,
+      snippet: cleanSnippet,
       viewerUrl,
       textPreview,
       mode: shouldUsePdfViewer ? "pdf" : "text",
       precisePhrase,
+      startOffset,
+      endOffset,
+      pageCount: doc?.page_count || 1,
+    });
+  };
+
+  const openCitationViewer = async (citation) => {
+    const filename = citation.source;
+    const page = citation.pageOneIndexed
+      ? Number(citation.page || 1)
+      : Number(citation.page || 0) + 1;
+    const snippet = (citation.snippet || "").trim();
+    await loadViewerForSource({
+      filename,
+      page,
+      snippet,
+      startOffset: 0,
+      endOffset: snippet ? snippet.length : null,
     });
   };
 
   const openSourceViewer = async (pdf) => {
-    await openCitationViewer({
-      source: pdf.filename,
-      page: 0,
-      snippet: pdf.abstract || pdf.title || pdf.filename,
+    await loadViewerForSource({
+      filename: pdf.filename,
+      page: 1,
+      snippet: "",
+    });
+  };
+
+  const changePdfViewerPage = async (delta) => {
+    if (!pdfViewer?.filename) return;
+    const nextPage = Math.min(Math.max(1, Number(pdfViewer.page || 1) + delta), Number(pdfViewer.pageCount || 1));
+    if (nextPage === pdfViewer.page) return;
+    await loadViewerForSource({
+      filename: pdfViewer.filename,
+      page: nextPage,
+      snippet: "",
+    });
+  };
+
+  const updateViewerSelection = ({ snippet, startOffset, endOffset }) => {
+    if (!pdfViewer) return;
+    const nextSnippet = (snippet || "").trim();
+    const precisePhrase = nextSnippet ? choosePrecisePhrase(nextSnippet, pdfViewer.textPreview || "") : "";
+    const doc = pdfs.find((p) => p.filename === pdfViewer.filename);
+    const docUrl = doc?.file_url ? `${API_BASE}${doc.file_url}` : `${API_BASE}/media/pdfs/${encodeURIComponent(pdfViewer.filename)}`;
+    const viewerUrl = buildPdfViewerUrl({
+      docUrl,
+      page: pdfViewer.page,
+      snippet: nextSnippet,
+      precisePhrase,
+      shouldUsePdfViewer: pdfViewer.mode === "pdf",
+    });
+
+    setPdfViewer((prev) => prev ? ({
+      ...prev,
+      snippet: nextSnippet,
+      precisePhrase,
+      startOffset,
+      endOffset,
+      viewerUrl,
+    }) : prev);
+  };
+
+  const captureViewerSelection = () => {
+    const container = selectableTextRef.current;
+    const selection = window.getSelection?.();
+    if (!container || !selection || selection.rangeCount === 0 || selection.isCollapsed) return;
+
+    const range = selection.getRangeAt(0);
+    if (!container.contains(range.commonAncestorContainer)) return;
+
+    const selectedText = selection.toString().replace(/\s+/g, " ").trim();
+    if (!selectedText) return;
+
+    const preRange = range.cloneRange();
+    preRange.selectNodeContents(container);
+    preRange.setEnd(range.startContainer, range.startOffset);
+    const startOffset = preRange.toString().length;
+    const endOffset = startOffset + range.toString().length;
+
+    updateViewerSelection({
+      snippet: selectedText,
+      startOffset,
+      endOffset,
     });
   };
 
@@ -563,6 +687,9 @@ function App() {
       if (pdfViewer?.filename) {
         await loadHighlightsForDocument(pdfViewer.filename);
       }
+      if (isHighlightSearchOpen && highlightPanelView === "saved") {
+        await loadSessionHighlights();
+      }
       setSelectedCitations([]);
       setSelectedCitationNote("");
       setSelectedCitationTags("");
@@ -595,18 +722,21 @@ function App() {
       .filter(Boolean);
 
     try {
-      await api.createHighlight({
-        document_id: doc.id,
-        page: pdfViewer.page,
-        start_offset: 0,
-        end_offset: pdfViewer.snippet.length,
-        text: pdfViewer.snippet,
-        note: highlightNote,
-        tags,
+        await api.createHighlight({
+          document_id: doc.id,
+          page: pdfViewer.page,
+          start_offset: pdfViewer.startOffset ?? 0,
+          end_offset: pdfViewer.endOffset ?? pdfViewer.snippet.length,
+          text: pdfViewer.snippet,
+          note: highlightNote,
+          tags,
       });
       setHighlightNote("");
       setHighlightTags("");
       await loadHighlightsForDocument(pdfViewer.filename);
+      if (isHighlightSearchOpen && highlightPanelView === "saved") {
+        await loadSessionHighlights();
+      }
       setStatus("Highlight saved");
     } catch (err) {
       setStatus("Failed to save highlight");
@@ -618,6 +748,9 @@ function App() {
       await api.deleteHighlight(highlightId);
       if (pdfViewer?.filename) {
         await loadHighlightsForDocument(pdfViewer.filename);
+      }
+      if (isHighlightSearchOpen && highlightPanelView === "saved") {
+        await loadSessionHighlights();
       }
     } catch (err) {
       console.error("Failed to delete highlight", err);
@@ -643,6 +776,20 @@ function App() {
     if (!q || !session) return;
     setHighlightSearchLoading(true);
     await runHighlightSearch(q);
+  };
+
+  const loadSessionHighlights = async () => {
+    if (!session) return;
+    setAllHighlightsLoading(true);
+    try {
+      const data = await api.listHighlights({ session });
+      setAllHighlights(data?.highlights || []);
+    } catch (err) {
+      console.error("Failed to load session highlights", err);
+      setAllHighlights([]);
+    } finally {
+      setAllHighlightsLoading(false);
+    }
   };
 
   const handleCreateSession = async (e) => {
@@ -1664,53 +1811,163 @@ function App() {
                   </div>
                   <h2>System Monitoring</h2>
                   {metrics ? (
-                    <div className="metrics-grid">
-                      <div className="metric-card">
-                        <h3>Average Latency</h3>
-                        <p className="metric-value">{metrics.queries.latency_avg_ms}ms</p>
+                    <div className="monitoring-layout">
+                      <div className="metrics-grid">
+                        <div className="metric-card emphasis-card">
+                          <h3>System Health</h3>
+                          <p className="metric-value">{healthScore}</p>
+                          <p className="metric-sub">Composite score from errors, refusals, evidence gaps, and confidence.</p>
+                        </div>
+                        <div className="metric-card">
+                          <h3>Grounded Answer Rate</h3>
+                          <p className="metric-value">{groundedAnswerRate.toFixed(1)}%</p>
+                          <p className="metric-sub">Runs that did not end in refusal or low-evidence fallback.</p>
+                        </div>
+                        <div className="metric-card">
+                          <h3>Average Latency</h3>
+                          <p className="metric-value">{formatMetricMs(metrics.queries.latency_avg_ms)}</p>
+                          <p className="metric-sub">Mean end-to-end response time.</p>
+                        </div>
+                        <div className="metric-card">
+                          <h3>Total Queries</h3>
+                          <p className="metric-value">{metrics.queries.total}</p>
+                          <p className="metric-sub">Observed in the current reporting window.</p>
+                        </div>
+                        <div className="metric-card">
+                          <h3>Error Rate</h3>
+                          <p className="metric-value">{(metrics.errors.rate * 100).toFixed(1)}%</p>
+                          <p className="metric-sub">{metrics.errors.count || 0} failed runs logged.</p>
+                        </div>
+                        <div className="metric-card">
+                          <h3>Active Sessions</h3>
+                          <p className="metric-value">{metrics.sessions?.active_count ?? 0}</p>
+                          <p className="metric-sub">Distinct sessions with recent activity.</p>
+                        </div>
+                        {metrics.grounding && (
+                          <>
+                            <div className="metric-card">
+                              <h3>Refusal Rate</h3>
+                              <p className="metric-value">{(metrics.grounding.refusal_rate * 100).toFixed(1)}%</p>
+                              <p className="metric-sub">{metrics.grounding.refusal_count} refusals</p>
+                            </div>
+                            <div className="metric-card">
+                              <h3>Low Evidence Rate</h3>
+                              <p className="metric-value">{(metrics.grounding.insufficient_evidence_rate * 100).toFixed(1)}%</p>
+                              <p className="metric-sub">{metrics.grounding.insufficient_evidence_count} flagged runs</p>
+                            </div>
+                            <div className="metric-card">
+                              <h3>Avg Chunks Retrieved</h3>
+                              <p className="metric-value">{metrics.grounding.avg_retrieved_chunks}</p>
+                              <p className="metric-sub">Signal for retrieval breadth.</p>
+                            </div>
+                            <div className="metric-card">
+                              <h3>Avg Confidence</h3>
+                              <p className="metric-value">{(metrics.grounding.avg_confidence_score || 0).toFixed(3)}</p>
+                              <p className="metric-sub">Mean grounded confidence score.</p>
+                            </div>
+                          </>
+                        )}
                       </div>
-                      <div className="metric-card">
-                        <h3>Total Queries</h3>
-                        <p className="metric-value">{metrics.queries.total}</p>
-                      </div>
-                      <div className="metric-card">
-                        <h3>Error Rate</h3>
-                        <p className="metric-value">{(metrics.errors.rate * 100).toFixed(1)}%</p>
-                      </div>
-                      <div className="metric-card">
-                        <h3>Active Sessions</h3>
-                        <p className="metric-value">{metrics.sessions?.active_count ?? 0}</p>
-                      </div>
-                      <div className="metric-info-full">
-                        <h4>Queries by Mode</h4>
-                        <ul>
-                          {Object.entries(metrics.queries.by_mode || {}).map(([m, count]) => (
-                            <li key={m}><strong>{m.toUpperCase()}:</strong> {count}</li>
-                          ))}
-                        </ul>
-                      </div>
-                      {metrics.grounding && (
-                        <>
-                          <div className="metric-card">
-                            <h3>Refusal Rate</h3>
-                            <p className="metric-value">{(metrics.grounding.refusal_rate * 100).toFixed(1)}%</p>
-                            <p className="metric-sub">{metrics.grounding.refusal_count} refusals</p>
+                      <div className="monitoring-panels">
+                        <section className="monitor-panel wide">
+                          <div className="monitor-panel-header">
+                            <div>
+                              <h3>Latency Breakdown</h3>
+                              <p>Where response time is actually spent.</p>
+                            </div>
+                            <strong>{formatMetricMs(latencyTotal)}</strong>
                           </div>
-                          <div className="metric-card">
-                            <h3>Low Evidence Rate</h3>
-                            <p className="metric-value">{(metrics.grounding.insufficient_evidence_rate * 100).toFixed(1)}%</p>
-                            <p className="metric-sub">{metrics.grounding.insufficient_evidence_count} flagged</p>
+                          <div className="latency-stack">
+                            {latencyBreakdown.map((item) => (
+                              <div
+                                key={item.label}
+                                className={`latency-segment ${item.tone}`}
+                                style={{ width: `${latencyTotal > 0 ? (item.value / latencyTotal) * 100 : 0}%` }}
+                                title={`${item.label}: ${formatMetricMs(item.value)}`}
+                              />
+                            ))}
                           </div>
-                          <div className="metric-card">
-                            <h3>Avg Chunks Retrieved</h3>
-                            <p className="metric-value">{metrics.grounding.avg_retrieved_chunks}</p>
+                          <div className="latency-legend">
+                            {latencyBreakdown.map((item) => (
+                              <div key={item.label} className="latency-legend-item">
+                                <span className={`legend-swatch ${item.tone}`} />
+                                <span>{item.label}</span>
+                                <strong>{formatMetricMs(item.value)}</strong>
+                              </div>
+                            ))}
                           </div>
-                          <div className="metric-card">
-                            <h3>Avg Confidence</h3>
-                            <p className="metric-value">{(metrics.grounding.avg_confidence_score || 0).toFixed(3)}</p>
+                        </section>
+                        <section className="monitor-panel wide">
+                          <div className="monitor-panel-header">
+                            <div>
+                              <h3>Queries by Mode</h3>
+                              <p>Distribution of workload across answer strategies.</p>
+                            </div>
+                            <strong>{totalQueries} total</strong>
                           </div>
-                        </>
-                      )}
+                          <div className="mode-bars">
+                            {queryModeEntries.length > 0 ? queryModeEntries.map(([m, count]) => (
+                              <div key={m} className="mode-bar-row">
+                                <div className="mode-bar-label">
+                                  <span>{m.replace(/_/g, " ").toUpperCase()}</span>
+                                  <strong>{count}</strong>
+                                </div>
+                                <div className="mode-bar-track">
+                                  <div
+                                    className="mode-bar-fill"
+                                    style={{ width: `${totalQueries > 0 ? (count / totalQueries) * 100 : 0}%` }}
+                                  />
+                                </div>
+                                <span className="mode-bar-share">
+                                  {totalQueries > 0 ? ((count / totalQueries) * 100).toFixed(1) : "0.0"}%
+                                </span>
+                              </div>
+                            )) : <p className="muted">No query data yet.</p>}
+                          </div>
+                        </section>
+                        <section className="monitor-panel">
+                          <div className="monitor-panel-header">
+                            <div>
+                              <h3>Error Hotspots</h3>
+                              <p>Most common backend failure categories.</p>
+                            </div>
+                          </div>
+                          <div className="error-list">
+                            {topErrors.length > 0 ? topErrors.map((error) => (
+                              <div key={error.error_type} className="error-list-item">
+                                <span>{error.error_type}</span>
+                                <strong>{error.count}</strong>
+                              </div>
+                            )) : <p className="muted">No errors recorded in this period.</p>}
+                          </div>
+                        </section>
+                        <section className="monitor-panel">
+                          <div className="monitor-panel-header">
+                            <div>
+                              <h3>Retrieval Quality Snapshot</h3>
+                              <p>Quick read on coverage and trustworthiness.</p>
+                            </div>
+                          </div>
+                          <div className="quality-stats">
+                            <div className="quality-stat">
+                              <span className="quality-label">Confidence</span>
+                              <strong>{((metrics?.grounding?.avg_confidence_score || 0) * 100).toFixed(1)} / 100</strong>
+                            </div>
+                            <div className="quality-stat">
+                              <span className="quality-label">Retrieved Chunks</span>
+                              <strong>{metrics?.grounding?.avg_retrieved_chunks || 0}</strong>
+                            </div>
+                            <div className="quality-stat">
+                              <span className="quality-label">Refusals</span>
+                              <strong>{metrics?.grounding?.refusal_count || 0}</strong>
+                            </div>
+                            <div className="quality-stat">
+                              <span className="quality-label">Low Evidence</span>
+                              <strong>{metrics?.grounding?.insufficient_evidence_count || 0}</strong>
+                            </div>
+                          </div>
+                        </section>
+                      </div>
                     </div>
                   ) : <p>Loading metrics...</p>}
                 </div>
@@ -1881,13 +2138,47 @@ function App() {
                       </pre>
                     </div>
                   )}
+                  <div className="drawer-section">
+                    <div className="viewer-selection-header">
+                      <div>
+                        <h4>{pdfViewer.mode === "pdf" ? "Selectable Page Text" : "Selectable Document Text"}</h4>
+                        <p className="muted">
+                          Select a passage here to turn it into the active citation.
+                        </p>
+                      </div>
+                      <div className="viewer-page-controls">
+                        <button
+                          type="button"
+                          className="text-btn"
+                          onClick={() => changePdfViewerPage(-1)}
+                          disabled={Number(pdfViewer.page || 1) <= 1}
+                        >
+                          Prev
+                        </button>
+                        <span className="muted">Page {pdfViewer.page}{pdfViewer.pageCount ? ` / ${pdfViewer.pageCount}` : ""}</span>
+                        <button
+                          type="button"
+                          className="text-btn"
+                          onClick={() => changePdfViewerPage(1)}
+                          disabled={Number(pdfViewer.page || 1) >= Number(pdfViewer.pageCount || 1)}
+                        >
+                          Next
+                        </button>
+                      </div>
+                    </div>
+                    <div className="selectable-text-panel" ref={selectableTextRef} onMouseUp={captureViewerSelection}>
+                      <pre className="text-preview-content selectable-text-content">
+                        {pdfViewer.textPreview || "No extracted text available for this page."}
+                      </pre>
+                    </div>
+                  </div>
                 </div>
 
                 <div className="pdf-notes-column">
                   <div className="drawer-section drawer-section-first">
                     <h4>Citation Snippet</h4>
-                    <p className="snippet-box">{pdfViewer.snippet || "No snippet provided."}</p>
-                    {pdfViewer.precisePhrase && (
+                    <p className="snippet-box">{pdfViewer.snippet || "Select text from the panel above to create a citation snippet."}</p>
+                    {pdfViewer.precisePhrase && pdfViewer.snippet && (
                       <p className="muted" style={{ marginTop: "6px" }}>
                         Precise page phrase: "{pdfViewer.precisePhrase}"
                       </p>
@@ -2053,39 +2344,117 @@ function App() {
             </div>
             {isHighlightSearchOpen && (
               <div className="highlight-search-inline">
-                <form className="input-group compact" onSubmit={searchMyHighlights}>
-                  <input
-                    type="text"
-                    value={highlightSearch}
-                    onChange={(e) => setHighlightSearch(e.target.value)}
-                    placeholder='Search saved highlights (e.g. "supporting evidence for claim X")'
-                  />
-                  <button className="btn-icon" type="submit">Go</button>
-                </form>
-                {highlightSearchLoading && <p className="muted">Searching highlights...</p>}
-                {highlightSearchResults.length > 0 && (
-                  <div className="global-highlight-results compact">
-                    {highlightSearchResults.slice(0, 5).map((hl) => (
-                      <button
-                        key={`global-${hl.id}-${hl.score}`}
-                        className="highlight-search-hit"
-                        onClick={() =>
-                          openCitationViewer({
-                            source: hl.filename,
-                            page: hl.page || 1,
-                            snippet: hl.text,
-                            pageOneIndexed: true,
-                          })
-                        }
-                      >
-                        <strong>{hl.filename}</strong> p.{hl.page} ({(hl.score || 0).toFixed(3)})
-                        <p>{hl.text}</p>
-                      </button>
-                    ))}
+                <div className="highlight-panel-tabs">
+                  <button
+                    type="button"
+                    className={`source-tab ${highlightPanelView === "search" ? "active" : ""}`}
+                    onClick={() => setHighlightPanelView("search")}
+                  >
+                    Search
+                  </button>
+                  <button
+                    type="button"
+                    className={`source-tab ${highlightPanelView === "saved" ? "active" : ""}`}
+                    onClick={() => setHighlightPanelView("saved")}
+                  >
+                    All Saved
+                  </button>
+                </div>
+                {highlightPanelView === "search" ? (
+                  <>
+                    <form className="input-group compact" onSubmit={searchMyHighlights}>
+                      <input
+                        type="text"
+                        value={highlightSearch}
+                        onChange={(e) => setHighlightSearch(e.target.value)}
+                        placeholder='Search saved highlights (e.g. "supporting evidence for claim X")'
+                      />
+                      <button className="btn-icon" type="submit">Go</button>
+                    </form>
+                    {highlightSearchLoading && <p className="muted">Searching highlights...</p>}
+                    {highlightSearchResults.length > 0 && (
+                      <div className="global-highlight-results compact">
+                        {highlightSearchResults.slice(0, 5).map((hl) => (
+                          <button
+                            key={`global-${hl.id}-${hl.score}`}
+                            className="highlight-search-hit"
+                            onClick={() =>
+                              openCitationViewer({
+                                source: hl.filename,
+                                page: hl.page || 1,
+                                snippet: hl.text,
+                                pageOneIndexed: true,
+                              })
+                            }
+                          >
+                            <strong>{hl.filename}</strong> p.{hl.page} ({(hl.score || 0).toFixed(3)})
+                            <p>{hl.text}</p>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {!highlightSearchLoading && highlightSearch.trim() && highlightSearchResults.length === 0 && (
+                      <p className="muted">No matching highlights.</p>
+                    )}
+                  </>
+                ) : (
+                  <div className="highlight-library">
+                    {allHighlightsLoading ? (
+                      <p className="muted">Loading saved highlights...</p>
+                    ) : allHighlights.length > 0 ? (
+                      Object.entries(
+                        allHighlights.reduce((groups, hl) => {
+                          const key = hl.filename || "Unknown source";
+                          if (!groups[key]) groups[key] = [];
+                          groups[key].push(hl);
+                          return groups;
+                        }, {})
+                      ).map(([filename, entries]) => (
+                        <div key={filename} className="highlight-library-group">
+                          <div className="highlight-library-header">
+                            <strong>{filename}</strong>
+                            <span>{entries.length} highlight{entries.length > 1 ? "s" : ""}</span>
+                          </div>
+                          <div className="highlight-list">
+                            {entries.map((hl) => (
+                              <div key={`saved-${hl.id}`} className="highlight-library-card">
+                                <div className="highlight-library-card-header">
+                                  <strong>p.{hl.page}</strong>
+                                  <div className="highlight-library-card-actions">
+                                    <button
+                                      type="button"
+                                      className="text-btn"
+                                      onClick={() =>
+                                        openCitationViewer({
+                                          source: hl.filename,
+                                          page: hl.page || 1,
+                                          snippet: hl.text,
+                                          pageOneIndexed: true,
+                                        })
+                                      }
+                                    >
+                                      Open
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="text-btn"
+                                      onClick={() => deleteHighlight(hl.id)}
+                                    >
+                                      Delete
+                                    </button>
+                                  </div>
+                                </div>
+                                <p>{hl.text}</p>
+                                {hl.note && <p className="muted">Note: {hl.note}</p>}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="muted">No saved highlights yet.</p>
+                    )}
                   </div>
-                )}
-                {!highlightSearchLoading && highlightSearch.trim() && highlightSearchResults.length === 0 && (
-                  <p className="muted">No matching highlights.</p>
                 )}
               </div>
             )}

@@ -131,8 +131,12 @@ export const api = {
     }),
   getRelatedPapers: ({ documentId, paperId, limit }) =>
     request(`/api/papers/related/${toQueryString({ document_id: documentId, paper_id: paperId, limit })}`),
-  listHighlights: (documentId) =>
-    request(`/api/highlights/${toQueryString({ document_id: documentId })}`),
+  listHighlights: (params) => {
+    if (typeof params === "number" || typeof params === "string") {
+      return request(`/api/highlights/${toQueryString({ document_id: params })}`);
+    }
+    return request(`/api/highlights/${toQueryString(params || {})}`);
+  },
   createHighlight: (payload) =>
     request("/api/highlights/", {
       method: "POST",
