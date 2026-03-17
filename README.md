@@ -2,6 +2,80 @@
 
 Scientific Research Navigator is a session-scoped research workspace for scientific papers.
 
+## Quick Start For Demo / Delivery
+
+This repository is now set up so the application can be launched with a single command using Docker Compose.
+
+### Recommended launch path
+
+Windows PowerShell:
+
+```powershell
+.\start-demo.ps1
+```
+
+Linux / WSL / macOS:
+
+```bash
+./start-demo.sh
+```
+
+What this does:
+- starts Postgres, Ollama, backend, worker, and frontend
+- automatically pulls the required Ollama models on first run:
+  - `mistral`
+  - `nomic-embed-text`
+- waits for the backend to become reachable
+
+Application URLs:
+- Frontend: `http://localhost:3000`
+- Backend API: `http://localhost:8000`
+
+To stop the stack:
+
+Windows PowerShell:
+
+```powershell
+.\stop-demo.ps1
+```
+
+Linux / WSL / macOS:
+
+```bash
+./stop-demo.sh
+```
+
+### Prerequisites
+
+Only these are required for the default delivery path:
+- Docker Desktop (or Docker Engine + Compose)
+- Internet access on first run to pull container images and Ollama models
+
+### First-run note
+
+The first launch can take several minutes because it may need to:
+- build the backend and frontend images
+- initialize Postgres
+- pull Ollama models
+
+Subsequent launches are much faster because Docker volumes persist:
+- database data
+- uploaded media
+- Chroma indexes
+- Ollama models
+
+### Presentation-safe startup checklist
+
+Before the final demo, run this once and verify:
+- `docker compose ps`
+- frontend loads on `http://localhost:3000`
+- backend responds on `http://localhost:8000/api/sessions/`
+- Ollama models are present:
+
+```bash
+docker compose exec ollama ollama list
+```
+
 It combines:
 - A Django + DRF backend for ingestion, retrieval, synthesis, discovery, and persistence
 - Session-scoped Chroma vector indexes for paper and highlight search
@@ -283,7 +357,7 @@ Main tables:
 - `Highlight`
 - `HighlightEmbedding`
 
-## Local Setup
+## Manual Local Setup
 
 ### 1. Start Ollama and Pull Models
 
@@ -343,6 +417,7 @@ docker compose up --build
 Services:
 - `postgres`
 - `ollama`
+- `ollama-init`
 - `backend`
 - `backend-worker`
 - `frontend`
