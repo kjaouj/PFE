@@ -13,7 +13,13 @@ from rest_framework.response import Response
 from rest_framework import status
 
 from .models import Session, Document, Question, Answer, RunLog, PaperSource, IngestionJob
-from .utils import get_default_session, normalize_filename, sanitize_json_value, sanitize_text
+from .utils import (
+    get_default_session,
+    get_or_create_session,
+    normalize_filename,
+    sanitize_json_value,
+    sanitize_text,
+)
 from .query import ask_with_citations, retrieve_paper_overview
 
 from .services.job_queue import enqueue_job
@@ -41,18 +47,31 @@ def _build_metadata_overview_answer(document: Document) -> dict:
     source = getattr(document, "paper_source", None)
     authors = getattr(source, "authors", "") if source else ""
     published = getattr(source, "published_date", None) if source else None
+    entry_url = getattr(source, "entry_url", "") if source else ""
+    source_type = getattr(source, "source_type", "") if source else ""
+    abstract_missing = not abstract or abstract.lower() == "no abstract available."
 
     lines = [f"{title}"]
     if authors:
         lines.append(f"Authors: {authors}")
     if published:
         lines.append(f"Published: {published}")
-    if abstract:
+    if source_type:
+        lines.append(f"Source: {source_type}")
+    if abstract and not abstract_missing:
         lines.append("")
         lines.append(f"Abstract summary: {abstract}")
     else:
         lines.append("")
-        lines.append("No abstract is available for this source.")
+        lines.append(
+            "I only have bibliographic metadata for this source, not a usable abstract or full text."
+        )
+        lines.append(
+            "That means I cannot reliably answer what the paper is about beyond its title and citation details."
+        )
+    if entry_url:
+        lines.append("")
+        lines.append(f"Source page: {entry_url}")
 
     lines.append("")
     lines.append("This answer is based on source metadata because the full PDF was not available.")
@@ -311,17 +330,7 @@ def ask_question(request):
         )
 
     # Resolve session
-    try:
-        session = (
-            Session.objects.get(name=session_name)
-            if session_name
-            else get_default_session()
-        )
-    except Session.DoesNotExist:
-        return Response(
-            {"error": f"Session '{session_name}' not found."},
-            status=status.HTTP_404_NOT_FOUND
-        )
+    session = get_or_create_session(session_name)
 
     question_obj = Question.objects.create(
         text=sanitize_text(question_text),
@@ -467,13 +476,47 @@ def ask_question(request):
                     sum(d.score for d in scored_docs) / len(scored_docs), 4
                 )
 
-            generation_start = time.perf_counter()
-            result = synthesis_service.generate_literature_review(
-                question_text, docs, sources
-            )
-            stage_timings["generation_ms"] = int(
-                (time.perf_counter() - generation_start) * 1000
-            )
+            distinct_retrieved_sources = {
+                d.metadata.get("source") for d in docs if d.metadata.get("source")
+            }
+            if len(distinct_retrieved_sources) < 2:
+                result = {
+                    "topic": question_text,
+                    "title": f"Literature Review: {question_text}",
+                    "content": (
+                        "I could not retrieve enough evidence from at least two different "
+                        "selected papers to produce a reliable literature review."
+                    ),
+                    "num_sources": len(distinct_retrieved_sources),
+                    "review_status": "incompatible_sources",
+                    "warning": (
+                        "The selected papers do not support a reliable unified literature review for this topic. "
+                        "The retrieved evidence came from too few distinct sources."
+                    ),
+                    "review_diagnostics": {
+                        "review_status": "incompatible_sources",
+                        "warning": (
+                            "The selected papers do not support a reliable unified literature review for this topic. "
+                            "The retrieved evidence came from too few distinct sources."
+                        ),
+                        "pairwise_overlap": 0.0,
+                        "topic_relevance": {},
+                        "fit_issues": [
+                            "Usable retrieved evidence came from fewer than two selected papers."
+                        ],
+                        "next_step": (
+                            "Refine the topic, verify that both papers contain relevant material, or switch to QA mode for paper-specific questions."
+                        ),
+                    },
+                }
+            else:
+                generation_start = time.perf_counter()
+                result = synthesis_service.generate_literature_review(
+                    question_text, docs, sources
+                )
+                stage_timings["generation_ms"] = int(
+                    (time.perf_counter() - generation_start) * 1000
+                )
             result["citations"] = retrieved_chunks
 
             Answer.objects.create(
@@ -484,6 +527,9 @@ def ask_question(request):
                     "title": result.get("title"),
                     "mode": "lit_review",
                     "num_sources": result.get("num_sources"),
+                    "review_status": result.get("review_status", "normal_review"),
+                    "warning": result.get("warning", ""),
+                    "review_diagnostics": result.get("review_diagnostics", {}),
                 }),
             )
 
@@ -667,17 +713,7 @@ def upload_pdf(request):
         )
 
     # Resolve session
-    try:
-        session = (
-            Session.objects.get(name=session_name)
-            if session_name
-            else get_default_session()
-        )
-    except Session.DoesNotExist:
-        return Response(
-            {"error": f"Session '{session_name}' not found."},
-            status=status.HTTP_404_NOT_FOUND
-        )
+    session = get_or_create_session(session_name)
 
     # Save file
     saved_path = default_storage.save(
@@ -761,17 +797,7 @@ def list_pdfs(request):
     """
     session_name = request.GET.get("session")
 
-    try:
-        session = (
-            Session.objects.get(name=session_name)
-            if session_name
-            else get_default_session()
-        )
-    except Session.DoesNotExist:
-        return Response(
-            {"error": f"Session '{session_name}' not found."},
-            status=status.HTTP_404_NOT_FOUND
-        )
+    session = get_or_create_session(session_name)
 
     pdfs = [
         {
@@ -805,6 +831,7 @@ def list_pdfs(request):
 @api_view(["POST"])
 def create_session(request):
     name = request.data.get("name")
+    pinned = bool(request.data.get("pinned", False))
 
     if not name:
         return Response(
@@ -812,12 +839,19 @@ def create_session(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    session, created = Session.objects.get_or_create(name=name)
+    session, created = Session.objects.get_or_create(
+        name=name,
+        defaults={"pinned": pinned},
+    )
+    if not created and pinned != session.pinned:
+        session.pinned = pinned
+        session.save(update_fields=["pinned"])
 
     return Response(
         {
             "session": session.name,
-            "created": created
+            "created": created,
+            "pinned": session.pinned,
         },
         status=status.HTTP_201_CREATED if created else status.HTTP_200_OK
     )
@@ -825,15 +859,36 @@ def create_session(request):
 
 @api_view(["GET"])
 def list_sessions(request):
-    sessions = Session.objects.all().order_by("-created_at")
-    data = [{"name": s.name, "created_at": s.created_at} for s in sessions]
+    sessions = Session.objects.all().order_by("-pinned", "-created_at", "name")
+    data = [{"name": s.name, "pinned": s.pinned, "created_at": s.created_at} for s in sessions]
     return Response(data, status=status.HTTP_200_OK)
 
 
-@api_view(["DELETE"])
-def delete_session(request, session_name):
+@api_view(["PATCH", "DELETE"])
+def session_detail(request, session_name):
     try:
         session = Session.objects.get(name=session_name)
+        if request.method == "PATCH":
+            new_name = (request.data.get("name") or "").strip()
+            pinned = request.data.get("pinned")
+
+            if new_name and new_name != session.name:
+                if Session.objects.exclude(id=session.id).filter(name=new_name).exists():
+                    return Response({"error": "Session name already exists"}, status=status.HTTP_400_BAD_REQUEST)
+                session.name = new_name
+
+            if pinned is not None:
+                session.pinned = bool(pinned)
+
+            session.save()
+            return Response(
+                {
+                    "session": session.name,
+                    "pinned": session.pinned,
+                },
+                status=status.HTTP_200_OK,
+            )
+
         # Chroma cleanup: get the path and delete the directory
         import shutil
         from .utils import get_session_path
@@ -928,11 +983,7 @@ def get_history(request):
     session_name = request.GET.get("session")
     
     try:
-        session = (
-            Session.objects.get(name=session_name)
-            if session_name
-            else get_default_session()
-        )
+        session = get_or_create_session(session_name)
         questions = session.questions.all().order_by("created_at")
         
         history = []

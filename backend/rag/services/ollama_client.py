@@ -59,8 +59,51 @@ def resolve_ollama_base_url(timeout_seconds: float = 1.5) -> Optional[str]:
     return _candidate_base_urls()[0] if _candidate_base_urls() else None
 
 
-def create_embeddings(model: str = "nomic-embed-text") -> OllamaEmbeddings:
+def _model_matches(name: str, requested: str) -> bool:
+    normalized_name = (name or "").strip()
+    normalized_requested = (requested or "").strip()
+    if not normalized_name or not normalized_requested:
+        return False
+    if normalized_name == normalized_requested:
+        return True
+    return normalized_name.split(":")[0] == normalized_requested.split(":")[0]
+
+
+@lru_cache(maxsize=16)
+def ensure_model_available(model: str, pull_timeout_seconds: float = 900.0) -> Optional[str]:
     base_url = resolve_ollama_base_url()
+    if not base_url:
+        return None
+
+    try:
+        response = requests.get(f"{base_url}/api/tags", timeout=5)
+        response.raise_for_status()
+        payload = response.json() or {}
+        for item in payload.get("models", []):
+            if _model_matches(item.get("name", ""), model):
+                return base_url
+    except requests.RequestException as exc:
+        logger.warning("Could not inspect Ollama models at %s: %s", base_url, exc)
+        return base_url
+
+    logger.warning("Ollama model '%s' is missing at %s. Pulling it now.", model, base_url)
+    try:
+        response = requests.post(
+            f"{base_url}/api/pull",
+            json={"name": model, "stream": False},
+            timeout=pull_timeout_seconds,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            f"Ollama model '{model}' is unavailable and automatic pull failed: {exc}"
+        ) from exc
+
+    return base_url
+
+
+def create_embeddings(model: str = "nomic-embed-text") -> OllamaEmbeddings:
+    base_url = ensure_model_available(model)
     kwargs = {"model": model}
     if base_url:
         kwargs["base_url"] = base_url
@@ -68,7 +111,7 @@ def create_embeddings(model: str = "nomic-embed-text") -> OllamaEmbeddings:
 
 
 def create_llm(model: str = "mistral") -> OllamaLLM:
-    base_url = resolve_ollama_base_url()
+    base_url = ensure_model_available(model)
     kwargs = {
         "model": model,
         "temperature": getattr(settings, "RAG_LLM_TEMPERATURE", 0.2),

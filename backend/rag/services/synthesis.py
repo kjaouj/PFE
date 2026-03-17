@@ -7,7 +7,9 @@ This service provides cross-document analysis capabilities:
 """
 
 import json
-from typing import List, Dict, Any, Optional
+import re
+from itertools import combinations
+from typing import List, Dict, Any, Optional, Set
 from collections import defaultdict
 from rag.services.ollama_client import create_llm
 
@@ -68,7 +70,7 @@ class SynthesisService:
         for paper in paper_summaries:
             paper_id = paper.get("paper_id", "unknown")
             focus = paper.get("focus", "")
-            contribution = paper.get("contribution", "")
+            contribution = paper.get("contribution") or paper.get("contributions", "")
             lines.append(f"- {paper_id}: {focus}".strip())
             if contribution:
                 lines.append(f"  Contribution: {contribution}")
@@ -89,6 +91,51 @@ class SynthesisService:
                     lines.append(f"- {item}")
             else:
                 lines.append("- The retrieved evidence did not support a confident synthesis for this section.")
+
+        return "\n".join(lines).strip()
+
+    def _format_incompatible_review(
+        self,
+        topic: str,
+        parsed: Dict[str, Any],
+        warning: str,
+    ) -> str:
+        lines = [
+            "1. Review Fit Alert",
+            warning,
+            "",
+            "2. Scope of Request",
+            (
+                parsed.get("scope")
+                or f'The selected papers do not form a coherent literature review set for "{topic}".'
+            ),
+            "",
+            "3. Paper-by-Paper Focus",
+        ]
+
+        for paper in parsed.get("paper_summaries", []):
+            paper_id = paper.get("paper_id", "unknown")
+            focus = paper.get("focus", "")
+            contribution = paper.get("contribution") or paper.get("contributions", "")
+            lines.append(f"- {paper_id}: {focus}".strip())
+            if contribution:
+                lines.append(f"  Contribution: {contribution}")
+
+        lines.extend([
+            "",
+            "4. Why a Unified Review Is Limited",
+        ])
+        for item in parsed.get("fit_issues", []):
+            lines.append(f"- {item}")
+
+        lines.extend([
+            "",
+            "5. Recommended Next Step",
+            parsed.get(
+                "next_step",
+                "Narrow the topic, remove unrelated papers, or use QA mode on each paper separately before attempting a literature review.",
+            ),
+        ])
 
         return "\n".join(lines).strip()
 
@@ -180,6 +227,133 @@ Snippets:
             elif line.startswith("* "):
                 bullets.append(line[2:].strip())
         return [bullet for bullet in bullets if bullet]
+
+    def _normalize_tokens(self, text: str) -> Set[str]:
+        stopwords = {
+            "a", "an", "and", "are", "as", "at", "be", "based", "by", "for",
+            "from", "in", "into", "is", "it", "of", "on", "or", "paper",
+            "papers", "review", "reviews", "study", "studies", "that", "the",
+            "their", "this", "to", "uses", "using", "with",
+        }
+        tokens = re.findall(r"[a-z0-9]+", text.lower())
+        return {token for token in tokens if len(token) > 2 and token not in stopwords}
+
+    def _jaccard(self, left: Set[str], right: Set[str]) -> float:
+        if not left or not right:
+            return 0.0
+        union = left | right
+        if not union:
+            return 0.0
+        return len(left & right) / len(union)
+
+    def assess_review_set(
+        self,
+        topic: str,
+        paper_summaries: List[Dict[str, str]],
+    ) -> Dict[str, Any]:
+        topic_tokens = self._normalize_tokens(topic)
+        paper_tokens = {}
+        topic_relevance = {}
+        fit_issues = []
+
+        for summary in paper_summaries:
+            paper_id = summary.get("paper_id", "unknown")
+            summary_text = " ".join(
+                [
+                    summary.get("focus", ""),
+                    summary.get("methods", ""),
+                    summary.get("contributions", ""),
+                    summary.get("limitations", ""),
+                ]
+            )
+            tokens = self._normalize_tokens(summary_text)
+            paper_tokens[paper_id] = tokens
+
+            if topic_tokens:
+                overlap = len(tokens & topic_tokens)
+                relevance = overlap / max(len(topic_tokens), 1)
+            else:
+                relevance = 0.5
+            topic_relevance[paper_id] = round(relevance, 3)
+
+        overlaps = []
+        for left_summary, right_summary in combinations(paper_summaries, 2):
+            left_id = left_summary.get("paper_id", "unknown")
+            right_id = right_summary.get("paper_id", "unknown")
+            overlap = self._jaccard(
+                paper_tokens.get(left_id, set()),
+                paper_tokens.get(right_id, set()),
+            )
+            overlaps.append(
+                {
+                    "papers": [left_id, right_id],
+                    "score": round(overlap, 3),
+                }
+            )
+
+        pairwise_overlap = round(
+            sum(item["score"] for item in overlaps) / len(overlaps),
+            3,
+        ) if overlaps else 0.0
+        min_relevance = min(topic_relevance.values()) if topic_relevance else 0.0
+        avg_relevance = round(
+            sum(topic_relevance.values()) / len(topic_relevance),
+            3,
+        ) if topic_relevance else 0.0
+
+        low_relevance_papers = [
+            paper_id for paper_id, score in topic_relevance.items() if score < 0.12
+        ]
+        if low_relevance_papers:
+            joined = ", ".join(low_relevance_papers)
+            fit_issues.append(
+                f"Low topic fit detected for {joined}; the retrieved evidence does not align strongly with the requested review topic."
+            )
+        if pairwise_overlap < 0.08:
+            fit_issues.append(
+                "The selected papers share very little topical overlap in their retrieved evidence, so cross-paper synthesis would be weak."
+            )
+        elif pairwise_overlap < 0.16:
+            fit_issues.append(
+                "The selected papers overlap only partially, so any cross-paper conclusions should be treated as tentative."
+            )
+
+        if low_relevance_papers or pairwise_overlap < 0.08 or avg_relevance < 0.18:
+            review_status = "incompatible_sources"
+        elif pairwise_overlap < 0.16 or min_relevance < 0.2:
+            review_status = "warning_review"
+        else:
+            review_status = "normal_review"
+
+        warning = ""
+        if review_status == "warning_review":
+            warning = (
+                "The selected papers only partially overlap with the requested topic. "
+                "Cross-paper conclusions are limited and should be read cautiously."
+            )
+        elif review_status == "incompatible_sources":
+            warning = (
+                "The selected papers do not support a reliable unified literature review for this topic. "
+                "The response below highlights each paper separately and explains why synthesis is limited."
+            )
+
+        next_step = (
+            "Refine the topic so it matches all selected papers, remove unrelated papers, or switch to QA mode for paper-specific questions."
+        )
+        if review_status == "warning_review":
+            next_step = (
+                "Consider narrowing the review topic or removing the least relevant paper if you want stronger cross-paper conclusions."
+            )
+
+        return {
+            "review_status": review_status,
+            "warning": warning,
+            "topic_relevance": topic_relevance,
+            "pairwise_overlap": pairwise_overlap,
+            "pairwise_details": overlaps,
+            "fit_issues": fit_issues,
+            "next_step": next_step,
+        }
 
     def _fallback_section_bullets(
         self,
@@ -397,11 +571,41 @@ JSON OUTPUT:
             self._summarize_paper_for_review(source, source_docs)
             for source, source_docs in docs_by_source.items()
         ]
+        review_fit = self.assess_review_set(topic, paper_summaries)
+
+        if review_fit["review_status"] == "incompatible_sources":
+            scope = (
+                f'The selected papers were evaluated against the requested topic "{topic}", '
+                "but they do not form a coherent review set."
+            )
+            parsed = {
+                "scope": scope,
+                "paper_summaries": paper_summaries,
+                "fit_issues": review_fit["fit_issues"],
+                "next_step": review_fit["next_step"],
+            }
+            final_content = self._format_incompatible_review(
+                topic,
+                parsed,
+                review_fit["warning"],
+            )
+            return {
+                "topic": topic,
+                "title": f"Literature Review: {topic}",
+                "content": final_content,
+                "num_sources": len(docs_by_source),
+                "structured_review": parsed,
+                "review_status": review_fit["review_status"],
+                "warning": review_fit["warning"],
+                "review_diagnostics": review_fit,
+            }
 
         scope = (
             f"This review synthesizes {len(docs_by_source)} selected papers on {topic}. "
             f"Each paper is treated separately before drawing cross-paper conclusions."
         )
+        if review_fit["review_status"] == "warning_review":
+            scope = f"{scope} {review_fit['warning']}"
         parsed = {
             "scope": scope,
             "paper_summaries": paper_summaries,
@@ -445,4 +649,7 @@ JSON OUTPUT:
             "content": final_content,
             "num_sources": len(docs_by_source),
             "structured_review": parsed,
+            "review_status": review_fit["review_status"],
+            "warning": review_fit["warning"],
+            "review_diagnostics": review_fit,
         }

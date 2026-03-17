@@ -9,7 +9,7 @@ from .views import (
     create_session, 
     delete_pdf, 
     list_sessions, 
-    delete_session, 
+    session_detail, 
     get_history,
     metrics_summary
 )
@@ -27,7 +27,7 @@ urlpatterns = [
     path("documents/<int:document_id>/retry/", retry_document_ingestion, name="retry_document_ingestion"),
     path("session/", create_session, name="create_session"),
     path("sessions/", list_sessions, name="list_sessions"),
-    path("session/<str:session_name>/", delete_session, name="delete_session"),
+    path("session/<str:session_name>/", session_detail, name="session_detail"),
     path("history/", get_history, name="get_history"),
     path("delete/", delete_pdf, name="delete_pdf"),
     path("metrics/summary/", metrics_summary, name="metrics_summary"),

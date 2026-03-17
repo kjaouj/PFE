@@ -14,6 +14,7 @@ from django.utils import timezone
 from rag.models import Document, IngestionJob, PaperSource
 from rag.services.ingestion import IngestionService
 from rag.services.import_utils import looks_like_pdf_url
+from rag.utils import normalize_filename
 
 logger = logging.getLogger(__name__)
 
@@ -150,15 +151,36 @@ class IngestionJobRunner:
             self.mark_failed(job, exc)
         return IngestionJob.objects.get(id=job.id)
 
+    def _require_success(self, result: dict | None):
+        if isinstance(result, dict) and result.get("status") == "error":
+            raise RuntimeError(result.get("message") or "Ingestion failed")
+        return result
+
+    def _convert_document_to_summary_only(
+        self,
+        *,
+        document_id: int,
+        source_type: str,
+        external_id: str | None = None,
+        title: str | None = None,
+    ) -> Document:
+        document = Document.objects.get(id=document_id)
+        identifier = (external_id or title or document.filename or "paper")[:48]
+        summary_filename = normalize_filename(f"{source_type}_{identifier}_abstract.txt")
+        document.filename = summary_filename
+        document.storage_path = None
+        document.save(update_fields=["filename", "storage_path"])
+        return document
+
     def _run_document_ingestion(self, document_id: int):
         document = Document.objects.get(id=document_id)
         storage_path = document.resolved_storage_path
 
         if storage_path and default_storage.exists(storage_path):
-            self.ingestion_service.ingest_document(
+            self._require_success(self.ingestion_service.ingest_document(
                 document.id,
                 default_storage.path(storage_path),
-            )
+            ))
             paper_source = getattr(document, "paper_source", None)
             if paper_source and not paper_source.imported:
                 paper_source.imported = True
@@ -167,12 +189,12 @@ class IngestionJobRunner:
 
         paper_source = getattr(document, "paper_source", None)
         if paper_source and (paper_source.abstract or document.abstract):
-            self.ingestion_service.ingest_metadata_only(
+            self._require_success(self.ingestion_service.ingest_metadata_only(
                 document_id=document.id,
                 title=(paper_source.title or document.title or document.filename),
                 abstract=(paper_source.abstract or document.abstract or ""),
                 authors=(paper_source.authors or ""),
-            )
+            ))
             if not paper_source.imported:
                 paper_source.imported = True
                 paper_source.save(update_fields=["imported"])
@@ -181,12 +203,12 @@ class IngestionJobRunner:
         raise FileNotFoundError("No local PDF found and no metadata fallback available")
 
     def _run_pubmed_import(self, document_id: int, paper_source_id: int, metadata: dict):
-        self.ingestion_service.ingest_metadata_only(
+        self._require_success(self.ingestion_service.ingest_metadata_only(
             document_id,
             metadata["title"],
             metadata["abstract"],
             ", ".join(metadata["authors"]),
-        )
+        ))
         PaperSource.objects.filter(id=paper_source_id).update(imported=True)
 
     def _run_semantic_scholar_import(
@@ -201,10 +223,10 @@ class IngestionJobRunner:
         if pdf_url and storage_path:
             try:
                 self._download_url_to_storage(pdf_url, storage_path)
-                self.ingestion_service.ingest_document(
+                self._require_success(self.ingestion_service.ingest_document(
                     document_id,
                     default_storage.path(storage_path),
-                )
+                ))
                 PaperSource.objects.filter(id=paper_source_id).update(imported=True)
                 return
             except Exception as exc:
@@ -213,13 +235,20 @@ class IngestionJobRunner:
                     document_id,
                     exc,
                 )
+                source = PaperSource.objects.filter(id=paper_source_id).first()
+                self._convert_document_to_summary_only(
+                    document_id=document_id,
+                    source_type="semanticscholar",
+                    external_id=(source.external_id if source else None),
+                    title=metadata.get("title"),
+                )
 
-        self.ingestion_service.ingest_metadata_only(
+        self._require_success(self.ingestion_service.ingest_metadata_only(
             document_id,
             metadata["title"],
             metadata["abstract"],
             ", ".join(metadata["authors"]),
-        )
+        ))
         PaperSource.objects.filter(id=paper_source_id).update(imported=True)
 
     def _run_remote_pdf_import(
@@ -234,10 +263,10 @@ class IngestionJobRunner:
         if pdf_url and storage_path:
             try:
                 self._download_url_to_storage(pdf_url, storage_path)
-                self.ingestion_service.ingest_document(
+                self._require_success(self.ingestion_service.ingest_document(
                     document_id,
                     default_storage.path(storage_path),
-                )
+                ))
                 PaperSource.objects.filter(id=paper_source_id).update(imported=True)
                 return
             except Exception as exc:
@@ -246,13 +275,20 @@ class IngestionJobRunner:
                     document_id,
                     exc,
                 )
+                source = PaperSource.objects.filter(id=paper_source_id).first()
+                self._convert_document_to_summary_only(
+                    document_id=document_id,
+                    source_type=(source.source_type if source else "remote"),
+                    external_id=(source.external_id if source else None),
+                    title=metadata.get("title"),
+                )
 
-        self.ingestion_service.ingest_metadata_only(
+        self._require_success(self.ingestion_service.ingest_metadata_only(
             document_id,
             metadata.get("title") or "Untitled paper",
             metadata.get("abstract") or "",
             ", ".join(metadata.get("authors") or []),
-        )
+        ))
         PaperSource.objects.filter(id=paper_source_id).update(imported=True)
 
     def _run_arxiv_import(

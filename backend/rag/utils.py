@@ -11,6 +11,14 @@ def get_default_session():
     return session
 
 
+def get_or_create_session(session_name: str | None):
+    normalized = (session_name or "").strip()
+    if not normalized:
+        return get_default_session()
+    session, _ = Session.objects.get_or_create(name=normalized)
+    return session
+
+
 # Base directory for all Chroma vector stores.
 # Reads from the CHROMA_PERSIST_DIR setting which itself comes from .env.
 BASE_CHROMA_DIR = Path(getattr(settings, "CHROMA_PERSIST_DIR", "data/chroma"))

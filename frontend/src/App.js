@@ -2,6 +2,15 @@ import { useState, useEffect, useRef } from "react";
 import "./App.css";
 import { api, API_BASE } from "./api";
 
+const DEFAULT_SESSION_NAME = "Research Session";
+const DEFAULT_SIDEBAR_ORDER = ["sessions", "uploadQueue", "externalSearch", "sources"];
+const DEFAULT_SIDEBAR_WIDTH = 360;
+const MIN_SIDEBAR_WIDTH = 280;
+const MAX_SIDEBAR_WIDTH = 520;
+const DEFAULT_PDF_DRAWER_WIDTH = 760;
+const MIN_PDF_DRAWER_WIDTH = 520;
+const MAX_PDF_DRAWER_WIDTH = 1280;
+
 const MODE_CONFIG = {
   qa: {
     label: "QA",
@@ -55,6 +64,7 @@ function IconChevron({ direction = "right" }) {
     right: "0deg",
     left: "180deg",
     down: "90deg",
+    up: "-90deg",
   }[direction];
 
   return (
@@ -64,12 +74,74 @@ function IconChevron({ direction = "right" }) {
   );
 }
 
+function IconPin() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M8 4h8l-1.5 5 3 3v1H13v6l-1-1-1-5H6v-1l3-3L8 4Z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function IconPencil() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="m4 20 4.5-1 9-9a2.2 2.2 0 0 0-3.1-3.1l-9 9L4 20Z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M13.5 6.5 17.5 10.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function IconGrip() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M9 6.5h.01M9 12h.01M9 17.5h.01M15 6.5h.01M15 12h.01M15 17.5h.01" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function App() {
-  const [session, setSession] = useState("Research Session");
+  const clampSidebarWidth = (value) => {
+    if (typeof window === "undefined") {
+      return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, value));
+    }
+    const viewportCap = Math.min(MAX_SIDEBAR_WIDTH, Math.floor(window.innerWidth * 0.5));
+    return Math.min(Math.max(viewportCap, MIN_SIDEBAR_WIDTH), Math.max(MIN_SIDEBAR_WIDTH, value));
+  };
+  const clampPdfDrawerWidth = (value) => {
+    if (typeof window === "undefined") {
+      return Math.min(MAX_PDF_DRAWER_WIDTH, Math.max(MIN_PDF_DRAWER_WIDTH, value));
+    }
+    const viewportCap = Math.min(MAX_PDF_DRAWER_WIDTH, Math.floor(window.innerWidth * 0.78));
+    return Math.min(Math.max(viewportCap, MIN_PDF_DRAWER_WIDTH), Math.max(MIN_PDF_DRAWER_WIDTH, value));
+  };
+
+  const [session, setSession] = useState(DEFAULT_SESSION_NAME);
   const [sessions, setSessions] = useState([]);
   const [newSessionName, setNewSessionName] = useState("");
   const [isSessionsOpen, setIsSessionsOpen] = useState(true);
   const [isSidebarVisible, setIsSidebarVisible] = useState(true);
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    try {
+      const raw = localStorage.getItem("sidebarWidth");
+      const parsed = raw ? Number(raw) : DEFAULT_SIDEBAR_WIDTH;
+      return Number.isFinite(parsed) ? clampSidebarWidth(parsed) : DEFAULT_SIDEBAR_WIDTH;
+    } catch {
+      return DEFAULT_SIDEBAR_WIDTH;
+    }
+  });
+  const [isSidebarResizing, setIsSidebarResizing] = useState(false);
+  const [sidebarOrder, setSidebarOrder] = useState(() => {
+    try {
+      const raw = localStorage.getItem("sidebarOrder");
+      const parsed = raw ? JSON.parse(raw) : null;
+      if (Array.isArray(parsed) && parsed.length === DEFAULT_SIDEBAR_ORDER.length) {
+        return parsed;
+      }
+    } catch { }
+    return DEFAULT_SIDEBAR_ORDER;
+  });
+  const [draggedSidebarSection, setDraggedSidebarSection] = useState(null);
+  const [sidebarDropTarget, setSidebarDropTarget] = useState(null);
   const [pdfs, setPdfs] = useState([]);
   const [selectedPdfs, setSelectedPdfs] = useState([]);
   const [question, setQuestion] = useState("");
@@ -86,18 +158,36 @@ function App() {
   const [highlightSearch, setHighlightSearch] = useState("");
   const [highlightSearchResults, setHighlightSearchResults] = useState([]);
   const [highlightSearchLoading, setHighlightSearchLoading] = useState(false);
-  const [isPdfDrawerFullscreen, setIsPdfDrawerFullscreen] = useState(false);
+  const [isHighlightSearchOpen, setIsHighlightSearchOpen] = useState(false);
+  const [pdfDrawerWidth, setPdfDrawerWidth] = useState(() => {
+    try {
+      const raw = localStorage.getItem("pdfDrawerWidth");
+      const parsed = raw ? Number(raw) : DEFAULT_PDF_DRAWER_WIDTH;
+      return Number.isFinite(parsed) ? clampPdfDrawerWidth(parsed) : DEFAULT_PDF_DRAWER_WIDTH;
+    } catch {
+      return DEFAULT_PDF_DRAWER_WIDTH;
+    }
+  });
+  const [isPdfDrawerResizing, setIsPdfDrawerResizing] = useState(false);
   const [externalLoading, setExternalLoading] = useState(false);
   const [externalError, setExternalError] = useState("");
   const [uploadQueue, setUploadQueue] = useState([]);
+  const [isUploadQueueCollapsed, setIsUploadQueueCollapsed] = useState(() => localStorage.getItem("uploadQueueCollapsed") === "true");
   const [isDragActive, setIsDragActive] = useState(false);
   const [sourceSearch, setSourceSearch] = useState("");
   const [sourceFilter, setSourceFilter] = useState("all");
   const [sourceSort, setSourceSort] = useState("recent");
   const [relatedPanel, setRelatedPanel] = useState(null);
   const [relatedLoading, setRelatedLoading] = useState(false);
+  const [editingSession, setEditingSession] = useState("");
+  const [editingSessionName, setEditingSessionName] = useState("");
+  const [selectedCitations, setSelectedCitations] = useState([]);
+  const [selectedCitationNote, setSelectedCitationNote] = useState("");
+  const [selectedCitationTags, setSelectedCitationTags] = useState("");
   const fileInputRef = useRef(null);
   const chatEndRef = useRef(null);
+  const sidebarResizeStartRef = useRef({ x: 0, width: DEFAULT_SIDEBAR_WIDTH });
+  const pdfDrawerResizeStartRef = useRef({ x: 0, width: DEFAULT_PDF_DRAWER_WIDTH });
   const distinctSelectedCount = new Set(selectedPdfs).size;
   const activeModeConfig = MODE_CONFIG[mode];
 
@@ -116,6 +206,78 @@ function App() {
     localStorage.setItem("theme", theme);
   }, [theme]);
 
+  useEffect(() => {
+    localStorage.setItem("sidebarOrder", JSON.stringify(sidebarOrder));
+  }, [sidebarOrder]);
+
+  useEffect(() => {
+    localStorage.setItem("sidebarWidth", String(sidebarWidth));
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    localStorage.setItem("pdfDrawerWidth", String(pdfDrawerWidth));
+  }, [pdfDrawerWidth]);
+
+  useEffect(() => {
+    localStorage.setItem("uploadQueueCollapsed", String(isUploadQueueCollapsed));
+  }, [isUploadQueueCollapsed]);
+
+  useEffect(() => {
+    if (!isSidebarResizing) return undefined;
+
+    const handlePointerMove = (event) => {
+      const nextWidth = sidebarResizeStartRef.current.width + (event.clientX - sidebarResizeStartRef.current.x);
+      setSidebarWidth(clampSidebarWidth(nextWidth));
+    };
+
+    const handlePointerUp = () => {
+      setIsSidebarResizing(false);
+    };
+
+    window.addEventListener("mousemove", handlePointerMove);
+    window.addEventListener("mouseup", handlePointerUp);
+    document.body.classList.add("sidebar-resizing");
+
+    return () => {
+      window.removeEventListener("mousemove", handlePointerMove);
+      window.removeEventListener("mouseup", handlePointerUp);
+      document.body.classList.remove("sidebar-resizing");
+    };
+  }, [isSidebarResizing]);
+
+  useEffect(() => {
+    if (!isPdfDrawerResizing) return undefined;
+
+    const handlePointerMove = (event) => {
+      const nextWidth = pdfDrawerResizeStartRef.current.width - (event.clientX - pdfDrawerResizeStartRef.current.x);
+      setPdfDrawerWidth(clampPdfDrawerWidth(nextWidth));
+    };
+
+    const handlePointerUp = () => {
+      setIsPdfDrawerResizing(false);
+    };
+
+    window.addEventListener("mousemove", handlePointerMove);
+    window.addEventListener("mouseup", handlePointerUp);
+    document.body.classList.add("pdf-drawer-resizing");
+
+    return () => {
+      window.removeEventListener("mousemove", handlePointerMove);
+      window.removeEventListener("mouseup", handlePointerUp);
+      document.body.classList.remove("pdf-drawer-resizing");
+    };
+  }, [isPdfDrawerResizing]);
+
+  useEffect(() => {
+    const handleResize = () => {
+      setSidebarWidth((current) => clampSidebarWidth(current));
+      setPdfDrawerWidth((current) => clampPdfDrawerWidth(current));
+    };
+
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
   const toggleTheme = () => {
     setTheme(prev => prev === "dark" ? "light" : "dark");
   };
@@ -132,6 +294,7 @@ function App() {
       loadPdfs();
       loadHistory();
     }
+    setSelectedCitations([]);
     if (mode === 'monitoring') {
       loadMetrics();
     }
@@ -166,11 +329,71 @@ function App() {
 
   const loadSessions = async () => {
     try {
-      const data = await api.listSessions();
+      let data = await api.listSessions();
+      if (!data || data.length === 0) {
+        await api.createSession(session || DEFAULT_SESSION_NAME);
+        data = await api.listSessions();
+      }
       setSessions(data || []);
+      if (data?.length > 0 && !data.some((item) => item.name === session)) {
+        setSession(data[0].name);
+      }
     } catch (err) {
       console.error("Failed to load sessions", err);
     }
+  };
+
+  const moveSidebarSection = (sectionId, direction) => {
+    setSidebarOrder((prev) => {
+      const index = prev.indexOf(sectionId);
+      if (index < 0) return prev;
+      const target = direction === "up" ? index - 1 : index + 1;
+      if (target < 0 || target >= prev.length) return prev;
+      const next = [...prev];
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  };
+
+  const placeSidebarSection = (sourceId, targetId) => {
+    if (!sourceId || !targetId || sourceId === targetId) return;
+    setSidebarOrder((prev) => {
+      const next = [...prev];
+      const sourceIndex = next.indexOf(sourceId);
+      const targetIndex = next.indexOf(targetId);
+      if (sourceIndex < 0 || targetIndex < 0) return prev;
+      const [moved] = next.splice(sourceIndex, 1);
+      const insertAt = sourceIndex < targetIndex ? targetIndex - 1 : targetIndex;
+      next.splice(insertAt, 0, moved);
+      return next;
+    });
+  };
+
+  const handleSidebarDragStart = (sectionId, event) => {
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", sectionId);
+    setDraggedSidebarSection(sectionId);
+    setSidebarDropTarget(null);
+  };
+
+  const handleSidebarDragOver = (sectionId, event) => {
+    event.preventDefault();
+    if (draggedSidebarSection && draggedSidebarSection !== sectionId) {
+      setSidebarDropTarget(sectionId);
+    }
+  };
+
+  const handleSidebarDrop = (sectionId, event) => {
+    event.preventDefault();
+    const sourceId = draggedSidebarSection || event.dataTransfer.getData("text/plain");
+    placeSidebarSection(sourceId, sectionId);
+    setDraggedSidebarSection(null);
+    setSidebarDropTarget(null);
+  };
+
+  const handleSidebarDragEnd = () => {
+    setDraggedSidebarSection(null);
+    setSidebarDropTarget(null);
   };
 
   const loadHistory = async () => {
@@ -241,6 +464,11 @@ function App() {
     return words.slice(0, 12).join(" ");
   };
 
+  const citationKey = (citation) => {
+    const page = citation?.pageOneIndexed ? Number(citation.page || 1) : Number(citation.page || 0) + 1;
+    return `${citation?.source || citation?.filename || "unknown"}::${page}::${(citation?.snippet || "").slice(0, 120)}`;
+  };
+
   const openCitationViewer = async (citation) => {
     const filename = citation.source;
     const page = citation.pageOneIndexed
@@ -283,7 +511,65 @@ function App() {
       mode: shouldUsePdfViewer ? "pdf" : "text",
       precisePhrase,
     });
-    setIsPdfDrawerFullscreen(false);
+  };
+
+  const openSourceViewer = async (pdf) => {
+    await openCitationViewer({
+      source: pdf.filename,
+      page: 0,
+      snippet: pdf.abstract || pdf.title || pdf.filename,
+    });
+  };
+
+  const toggleCitationSelection = (citation, e) => {
+    e?.stopPropagation();
+    const key = citationKey(citation);
+    setSelectedCitations((prev) => {
+      const exists = prev.some((item) => citationKey(item) === key);
+      if (exists) {
+        return prev.filter((item) => citationKey(item) !== key);
+      }
+      return [...prev, citation];
+    });
+  };
+
+  const saveSelectedCitationsAsHighlights = async () => {
+    if (selectedCitations.length === 0) return;
+    const tags = selectedCitationTags
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
+
+    try {
+      for (const citation of selectedCitations) {
+        const filename = citation.source || citation.filename;
+        const doc = pdfs.find((item) => item.filename === filename);
+        if (!doc) continue;
+        const page = citation.pageOneIndexed
+          ? Number(citation.page || 1)
+          : Number(citation.page || 0) + 1;
+        const text = citation.snippet || "";
+        if (!text) continue;
+        await api.createHighlight({
+          document_id: doc.id,
+          page,
+          start_offset: 0,
+          end_offset: text.length,
+          text,
+          note: selectedCitationNote,
+          tags,
+        });
+      }
+      if (pdfViewer?.filename) {
+        await loadHighlightsForDocument(pdfViewer.filename);
+      }
+      setSelectedCitations([]);
+      setSelectedCitationNote("");
+      setSelectedCitationTags("");
+      setStatus("Selected citations saved to highlights");
+    } catch (err) {
+      setStatus("Failed to save selected citations");
+    }
   };
 
   const loadHighlightsForDocument = async (filename) => {
@@ -375,6 +661,46 @@ function App() {
     }
   };
 
+  const startRenamingSession = (name) => {
+    setEditingSession(name);
+    setEditingSessionName(name);
+  };
+
+  const cancelRenamingSession = () => {
+    setEditingSession("");
+    setEditingSessionName("");
+  };
+
+  const submitSessionRename = async (originalName) => {
+    const nextName = editingSessionName.trim();
+    if (!nextName || nextName === originalName) {
+      cancelRenamingSession();
+      return;
+    }
+    setStatus("Renaming session...");
+    try {
+      const data = await api.updateSession(originalName, { name: nextName });
+      if (session === originalName) {
+        setSession(data?.session || nextName);
+      }
+      await loadSessions();
+      cancelRenamingSession();
+      setStatus("Session renamed");
+    } catch (err) {
+      setStatus(err?.message || "Rename failed");
+    }
+  };
+
+  const toggleSessionPin = async (sessionItem) => {
+    try {
+      await api.updateSession(sessionItem.name, { pinned: !sessionItem.pinned });
+      await loadSessions();
+      setStatus(sessionItem.pinned ? "Session unpinned" : "Session pinned");
+    } catch (err) {
+      setStatus(err?.message || "Pin update failed");
+    }
+  };
+
   const deleteSession = async (e, name) => {
     e.stopPropagation();
     if (!window.confirm(`Delete entire workflow for "${name}"? This cannot be undone.`)) return;
@@ -393,6 +719,10 @@ function App() {
       console.error("Delete failed", err);
       setStatus("Delete failed");
     }
+  };
+
+  const clearAllUploads = () => {
+    setUploadQueue((prev) => prev.filter((item) => item.status === "uploading"));
   };
 
   const [arxivQuery, setArxivQuery] = useState("");
@@ -490,11 +820,11 @@ function App() {
           prev.map((item) =>
             item.id === nextUpload.id
               ? {
-                  ...item,
-                  status: err?.aborted ? "canceled" : "failed",
-                  controller: null,
-                  error: err?.message || "Upload failed",
-                }
+                ...item,
+                status: err?.aborted ? "canceled" : "failed",
+                controller: null,
+                error: err?.message || "Upload failed",
+              }
               : item
           )
         );
@@ -645,6 +975,9 @@ function App() {
           text: data.content,
           title: data.title || "Literature Review",
           citations: data.citations || [],
+          reviewStatus: data.review_status || "normal_review",
+          reviewWarning: data.warning || "",
+          reviewDiagnostics: data.review_diagnostics || null,
         }]);
       } else {
         setMessages(prev => [...prev, {
@@ -723,8 +1056,29 @@ function App() {
     enqueueFiles(e.dataTransfer.files);
   };
 
+  const startSidebarResize = (event) => {
+    event.preventDefault();
+    sidebarResizeStartRef.current = {
+      x: event.clientX,
+      width: sidebarWidth,
+    };
+    setIsSidebarResizing(true);
+  };
+
+  const startPdfDrawerResize = (event) => {
+    event.preventDefault();
+    pdfDrawerResizeStartRef.current = {
+      x: event.clientX,
+      width: pdfDrawerWidth,
+    };
+    setIsPdfDrawerResizing(true);
+  };
+
   return (
-    <div className={`app-layout ${theme === 'light' ? 'light-mode' : ''} ${isSidebarVisible ? '' : 'sidebar-hidden'}`}>
+    <div
+      className={`app-layout ${theme === 'light' ? 'light-mode' : ''} ${isSidebarVisible ? '' : 'sidebar-hidden'} ${isSidebarResizing ? 'sidebar-resizing' : ''}`}
+      style={{ "--sidebar-width": `${sidebarWidth}px` }}
+    >
       {/* Sidebar */}
       {isSidebarVisible && <aside className="sidebar">
         <div className="sidebar-header">
@@ -742,11 +1096,35 @@ function App() {
         </div>
 
         <div className="sidebar-scroll">
-          <div className="session-config">
-            <span className="section-label" onClick={() => setIsSessionsOpen(!isSessionsOpen)}>
-              Your Sessions
-              <span className={`toggle-icon ${isSessionsOpen ? 'open' : ''}`}>{">"}</span>
-            </span>
+          <div
+            className={`sidebar-panel session-config ${draggedSidebarSection === "sessions" ? "dragging" : ""} ${sidebarDropTarget === "sessions" ? "drag-target" : ""}`}
+            style={{ order: sidebarOrder.indexOf("sessions") }}
+            onDragOver={(e) => handleSidebarDragOver("sessions", e)}
+            onDrop={(e) => handleSidebarDrop("sessions", e)}
+          >
+            <div className="section-header">
+              <span className="section-label" onClick={() => setIsSessionsOpen(!isSessionsOpen)}>
+                Your Sessions
+                <span className={`toggle-icon ${isSessionsOpen ? 'open' : ''}`}>{">"}</span>
+              </span>
+              <div className="panel-order-controls">
+                <button
+                  className="icon-btn drag-handle-btn"
+                  draggable="true"
+                  onDragStart={(e) => handleSidebarDragStart("sessions", e)}
+                  onDragEnd={handleSidebarDragEnd}
+                  title="Drag to reorder panels"
+                >
+                  <IconGrip />
+                </button>
+                <button className="icon-btn" onClick={() => moveSidebarSection("sessions", "up")} title="Move section up">
+                  <IconChevron direction="up" />
+                </button>
+                <button className="icon-btn" onClick={() => moveSidebarSection("sessions", "down")} title="Move section down">
+                  <IconChevron direction="down" />
+                </button>
+              </div>
+            </div>
 
             <div className={`session-list ${isSessionsOpen ? '' : 'collapsed'}`}
               style={{ maxHeight: isSessionsOpen ? '1000px' : '0' }}>
@@ -760,15 +1138,81 @@ function App() {
                     <span className="session-item-icon" aria-hidden="true">
                       <IconFolder />
                     </span>
-                    {s.name}
+                    {editingSession === s.name ? (
+                      <form
+                        className="session-edit-form"
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          submitSessionRename(s.name);
+                        }}
+                      >
+                        <input
+                          type="text"
+                          value={editingSessionName}
+                          onChange={(e) => setEditingSessionName(e.target.value)}
+                          onClick={(e) => e.stopPropagation()}
+                          autoFocus
+                        />
+                      </form>
+                    ) : (
+                      <span className="session-name-text">{s.name}</span>
+                    )}
                   </div>
-                  <button
-                    className="delete-session-btn"
-                    onClick={(e) => deleteSession(e, s.name)}
-                    title="Delete Session"
-                  >
-                    &times;
-                  </button>
+                  <div className="session-actions">
+                    <button
+                      className={`icon-btn ${s.pinned ? "active" : ""}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleSessionPin(s);
+                      }}
+                      title={s.pinned ? "Unpin session" : "Pin session"}
+                    >
+                      <IconPin />
+                    </button>
+                    {editingSession === s.name ? (
+                      <>
+                        <button
+                          className="text-btn"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            submitSessionRename(s.name);
+                          }}
+                          title="Save session name"
+                        >
+                          Save
+                        </button>
+                        <button
+                          className="text-btn"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            cancelRenamingSession();
+                          }}
+                          title="Cancel rename"
+                        >
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        className="icon-btn"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          startRenamingSession(s.name);
+                        }}
+                        title="Rename session"
+                      >
+                        <IconPencil />
+                      </button>
+                    )}
+                    <button
+                      className="delete-session-btn"
+                      onClick={(e) => deleteSession(e, s.name)}
+                      title="Delete Session"
+                    >
+                      &times;
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
@@ -787,12 +1231,106 @@ function App() {
             </form>
           </div>
 
-          <div className="source-management">
+          <div
+            className={`sidebar-panel upload-queue-section ${draggedSidebarSection === "uploadQueue" ? "dragging" : ""} ${sidebarDropTarget === "uploadQueue" ? "drag-target" : ""}`}
+            style={{ order: sidebarOrder.indexOf("uploadQueue") }}
+            onDragOver={(e) => handleSidebarDragOver("uploadQueue", e)}
+            onDrop={(e) => handleSidebarDrop("uploadQueue", e)}
+          >
+            <div className="section-header">
+              <span className="section-label">Upload Queue</span>
+              <div className="panel-order-controls">
+                <button
+                  className="icon-btn drag-handle-btn"
+                  draggable="true"
+                  onDragStart={(e) => handleSidebarDragStart("uploadQueue", e)}
+                  onDragEnd={handleSidebarDragEnd}
+                  title="Drag to reorder panels"
+                >
+                  <IconGrip />
+                </button>
+                <button className="icon-btn" onClick={() => moveSidebarSection("uploadQueue", "up")} title="Move section up">
+                  <IconChevron direction="up" />
+                </button>
+                <button className="icon-btn" onClick={() => moveSidebarSection("uploadQueue", "down")} title="Move section down">
+                  <IconChevron direction="down" />
+                </button>
+                <button className="icon-btn" onClick={() => setIsUploadQueueCollapsed((v) => !v)} title={isUploadQueueCollapsed ? "Expand queue" : "Collapse queue"}>
+                  <IconChevron direction={isUploadQueueCollapsed ? "right" : "down"} />
+                </button>
+              </div>
+            </div>
+            <div className="upload-queue-header compact">
+              <strong>{queueSummary.active} active</strong>
+              <span className="muted">{queueSummary.failed} failed, {queueSummary.completed} done</span>
+            </div>
+            {!isUploadQueueCollapsed && (
+              <>
+                {uploadQueue.length > 0 ? (
+                  <>
+                    <div className="upload-queue-toolbar">
+                      <button className="text-btn" onClick={clearAllUploads}>Clear All</button>
+                    </div>
+                    <div className="upload-queue-list">
+                      {uploadQueue.map((item) => (
+                        <div key={item.id} className={`upload-queue-item ${item.status}`}>
+                          <div className="upload-queue-meta">
+                            <span className="upload-queue-name" title={item.file.name}>{item.file.name}</span>
+                            <span className="upload-queue-state">{item.status}{item.error ? ` - ${item.error}` : ""}</span>
+                          </div>
+                          <div className="upload-progress-track">
+                            <div className="upload-progress-fill" style={{ width: `${item.progress || 0}%` }} />
+                          </div>
+                          <div className="upload-queue-actions">
+                            {(item.status === "queued" || item.status === "uploading") && (
+                              <button className="text-btn" onClick={() => cancelQueuedUpload(item.id)}>Cancel</button>
+                            )}
+                            {(item.status === "failed" || item.status === "canceled") && (
+                              <button className="text-btn" onClick={() => retryQueuedUpload(item.id)}>Retry</button>
+                            )}
+                            {(item.status === "completed" || item.status === "failed" || item.status === "canceled") && (
+                              <button className="text-btn" onClick={() => removeQueuedUpload(item.id)}>Clear</button>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <p className="muted">No queued uploads.</p>
+                )}
+              </>
+            )}
+          </div>
+
+          <div
+            className={`sidebar-panel source-management ${draggedSidebarSection === "externalSearch" ? "dragging" : ""} ${sidebarDropTarget === "externalSearch" ? "drag-target" : ""}`}
+            style={{ order: sidebarOrder.indexOf("externalSearch") }}
+            onDragOver={(e) => handleSidebarDragOver("externalSearch", e)}
+            onDrop={(e) => handleSidebarDrop("externalSearch", e)}
+          >
             <div className="section-header">
               <span className="section-label">External Search</span>
-              <button className="text-btn" onClick={() => setIsArxivOpen(!isArxivOpen)}>
-                {isArxivOpen ? 'Close' : 'Open'}
-              </button>
+              <div className="panel-order-controls">
+                <button
+                  className="icon-btn drag-handle-btn"
+                  draggable="true"
+                  onDragStart={(e) => handleSidebarDragStart("externalSearch", e)}
+                  onDragEnd={handleSidebarDragEnd}
+                  title="Drag to reorder panels"
+                >
+                  <IconGrip />
+                </button>
+                <button className="icon-btn" onClick={() => moveSidebarSection("externalSearch", "up")} title="Move section up">
+                  <IconChevron direction="up" />
+                </button>
+                <button className="icon-btn" onClick={() => moveSidebarSection("externalSearch", "down")} title="Move section down">
+                  <IconChevron direction="down" />
+                </button>
+                <button className="text-btn" onClick={() => setIsArxivOpen(!isArxivOpen)}>
+                  {isArxivOpen ? 'Close' : 'Open'}
+                </button>
+              </div>
             </div>
 
             {isArxivOpen && (
@@ -870,19 +1408,43 @@ function App() {
                 </div>
               </div>
             )}
+          </div>
 
+          <div
+            className={`sidebar-panel source-management ${draggedSidebarSection === "sources" ? "dragging" : ""} ${sidebarDropTarget === "sources" ? "drag-target" : ""}`}
+            style={{ order: sidebarOrder.indexOf("sources") }}
+            onDragOver={(e) => handleSidebarDragOver("sources", e)}
+            onDrop={(e) => handleSidebarDrop("sources", e)}
+          >
             <div className="section-header">
               <span className="section-label">Sources ({pdfs.length})</span>
-              {visiblePdfs.length > 0 && (
+              <div className="panel-order-controls">
                 <button
-                  className="text-btn"
-                  onClick={() => setSelectedPdfs(
-                    selectedPdfs.length === visiblePdfs.length ? [] : visiblePdfs.map(p => p.filename)
-                  )}
+                  className="icon-btn drag-handle-btn"
+                  draggable="true"
+                  onDragStart={(e) => handleSidebarDragStart("sources", e)}
+                  onDragEnd={handleSidebarDragEnd}
+                  title="Drag to reorder panels"
                 >
-                  {selectedPdfs.length === visiblePdfs.length ? 'Deselect All' : 'Select All'}
+                  <IconGrip />
                 </button>
-              )}
+                <button className="icon-btn" onClick={() => moveSidebarSection("sources", "up")} title="Move section up">
+                  <IconChevron direction="up" />
+                </button>
+                <button className="icon-btn" onClick={() => moveSidebarSection("sources", "down")} title="Move section down">
+                  <IconChevron direction="down" />
+                </button>
+                {visiblePdfs.length > 0 && (
+                  <button
+                    className="text-btn"
+                    onClick={() => setSelectedPdfs(
+                      selectedPdfs.length === visiblePdfs.length ? [] : visiblePdfs.map(p => p.filename)
+                    )}
+                  >
+                    {selectedPdfs.length === visiblePdfs.length ? 'Deselect All' : 'Select All'}
+                  </button>
+                )}
+              </div>
             </div>
 
             <div
@@ -903,41 +1465,6 @@ function App() {
                 multiple
               />
             </div>
-
-            {uploadQueue.length > 0 && (
-              <div className="upload-queue-panel">
-                <div className="upload-queue-header">
-                  <strong>Upload Queue</strong>
-                  <span className="muted">
-                    {queueSummary.active} active, {queueSummary.failed} failed, {queueSummary.completed} done
-                  </span>
-                </div>
-                <div className="upload-queue-list">
-                  {uploadQueue.map((item) => (
-                    <div key={item.id} className={`upload-queue-item ${item.status}`}>
-                      <div className="upload-queue-meta">
-                        <span className="upload-queue-name" title={item.file.name}>{item.file.name}</span>
-                        <span className="upload-queue-state">{item.status}{item.error ? ` - ${item.error}` : ""}</span>
-                      </div>
-                      <div className="upload-progress-track">
-                        <div className="upload-progress-fill" style={{ width: `${item.progress || 0}%` }} />
-                      </div>
-                      <div className="upload-queue-actions">
-                        {(item.status === "queued" || item.status === "uploading") && (
-                          <button className="text-btn" onClick={() => cancelQueuedUpload(item.id)}>Cancel</button>
-                        )}
-                        {(item.status === "failed" || item.status === "canceled") && (
-                          <button className="text-btn" onClick={() => retryQueuedUpload(item.id)}>Retry</button>
-                        )}
-                        {(item.status === "completed" || item.status === "failed" || item.status === "canceled") && (
-                          <button className="text-btn" onClick={() => removeQueuedUpload(item.id)}>Clear</button>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
 
             <div className="source-toolbar">
               <input
@@ -992,6 +1519,16 @@ function App() {
                       </span>
                     </div>
                     <div className="source-actions">
+                      <button
+                        className="mini-btn"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openSourceViewer(pdf);
+                        }}
+                        title="Open source in reader"
+                      >
+                        Open
+                      </button>
                       <button
                         className="discover-source-btn"
                         onClick={(e) => {
@@ -1081,6 +1618,16 @@ function App() {
         </div>
       </aside>}
 
+      {isSidebarVisible && (
+        <button
+          type="button"
+          className="sidebar-resize-handle"
+          onMouseDown={startSidebarResize}
+          aria-label="Resize sidebar"
+          title="Drag to resize sidebar"
+        />
+      )}
+
       <button
         className={`sidebar-edge-toggle ${isSidebarVisible ? "visible" : "hidden"}`}
         onClick={() => setIsSidebarVisible((v) => !v)}
@@ -1092,363 +1639,365 @@ function App() {
 
       {/* Main Content */}
       <main className="main-content">
-        <div className="mode-selector">
-          {['qa', 'compare', 'lit_review', 'monitoring'].map(m => (
-            <button
-              key={m}
-              className={`mode-btn ${mode === m ? 'active' : ''}`}
-              onClick={() => setMode(m)}
-            >
-              {MODE_CONFIG[m].label}
-            </button>
-          ))}
-        </div>
-        <div className="workspace-summary">
-          <span className="summary-chip"><strong>Session:</strong> {session || "None"}</span>
-          <span className="summary-chip"><strong>Selected Sources:</strong> {selectedPdfs.length}</span>
-          <span className="summary-chip"><strong>Total Sources:</strong> {pdfs.length}</span>
-          {mode !== "monitoring" && <span className="summary-chip"><strong>Mode:</strong> {activeModeConfig.label}</span>}
-        </div>
-        <div className="workspace-notices">
-          {status && <div className="status-indicator">{status}</div>}
-          {mode !== "monitoring" && (
-            <div className="mode-explainer">
-              <strong>{activeModeConfig.label}:</strong> {activeModeConfig.description}
-              {activeModeConfig.minSources > 1 && (
-                <span> Select at least {activeModeConfig.minSources} papers.</span>
-              )}
-            </div>
-          )}
-        </div>
-
-        {mode !== "monitoring" && (
-          <div className="global-highlight-search">
-            <form className="input-group" onSubmit={searchMyHighlights}>
-              <input
-                type="text"
-                value={highlightSearch}
-                onChange={(e) => setHighlightSearch(e.target.value)}
-                placeholder='Search in my highlights (e.g. "supporting evidence for claim X")'
-              />
-              <button className="btn-icon" type="submit">Go</button>
-            </form>
-            {highlightSearchLoading && <p className="muted">Searching highlights...</p>}
-            {highlightSearchResults.length > 0 && (
-              <div className="global-highlight-results">
-                {highlightSearchResults.slice(0, 5).map((hl) => (
-                  <button
-                    key={`global-${hl.id}-${hl.score}`}
-                    className="highlight-search-hit"
-                    onClick={() =>
-                      openCitationViewer({
-                        source: hl.filename,
-                        page: hl.page || 1,
-                        snippet: hl.text,
-                        pageOneIndexed: true,
-                      })
-                    }
-                  >
-                    <strong>{hl.filename}</strong> p.{hl.page} ({(hl.score || 0).toFixed(3)})
-                    <p>{hl.text}</p>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        <div className="chat-container">
-          {mode === 'monitoring' ? (
-            <div className="monitoring-dashboard">
-              <h2>System Monitoring</h2>
-              {metrics ? (
-                <div className="metrics-grid">
-                  <div className="metric-card">
-                    <h3>Average Latency</h3>
-                    <p className="metric-value">{metrics.queries.latency_avg_ms}ms</p>
+        <div className={`workspace-body ${pdfViewer ? "with-viewer" : ""}`}>
+          <div className="conversation-pane">
+            <div className="chat-container">
+              {mode === 'monitoring' ? (
+                <div className="monitoring-dashboard">
+                  <div className="mode-selector compact monitoring-modes">
+                    {['qa', 'compare', 'lit_review', 'monitoring'].map((m) => {
+                      const config = MODE_CONFIG[m];
+                      const minSourcesHint = config.minSources > 1 ? ` Requires at least ${config.minSources} sources.` : "";
+                      return (
+                        <button
+                          key={m}
+                          type="button"
+                          className={`mode-btn compact ${mode === m ? 'active' : ''}`}
+                          onClick={() => setMode(m)}
+                          title={`${config.label}: ${config.description}${minSourcesHint}`}
+                          aria-label={`${config.label}. ${config.description}${minSourcesHint}`}
+                        >
+                          {config.label}
+                        </button>
+                      );
+                    })}
                   </div>
-                  <div className="metric-card">
-                    <h3>Total Queries</h3>
-                    <p className="metric-value">{metrics.queries.total}</p>
-                  </div>
-                  <div className="metric-card">
-                    <h3>Error Rate</h3>
-                    <p className="metric-value">{(metrics.errors.rate * 100).toFixed(1)}%</p>
-                  </div>
-                  <div className="metric-card">
-                    <h3>Active Sessions</h3>
-                    <p className="metric-value">{metrics.sessions?.active_count ?? 0}</p>
-                  </div>
-                  <div className="metric-info-full">
-                    <h4>Queries by Mode</h4>
-                    <ul>
-                      {Object.entries(metrics.queries.by_mode || {}).map(([m, count]) => (
-                        <li key={m}><strong>{m.toUpperCase()}:</strong> {count}</li>
-                      ))}
-                    </ul>
-                  </div>
-                  {metrics.grounding && (
-                    <>
+                  <h2>System Monitoring</h2>
+                  {metrics ? (
+                    <div className="metrics-grid">
                       <div className="metric-card">
-                        <h3>Refusal Rate</h3>
-                        <p className="metric-value">{(metrics.grounding.refusal_rate * 100).toFixed(1)}%</p>
-                        <p className="metric-sub">{metrics.grounding.refusal_count} refusals</p>
+                        <h3>Average Latency</h3>
+                        <p className="metric-value">{metrics.queries.latency_avg_ms}ms</p>
                       </div>
                       <div className="metric-card">
-                        <h3>Low Evidence Rate</h3>
-                        <p className="metric-value">{(metrics.grounding.insufficient_evidence_rate * 100).toFixed(1)}%</p>
-                        <p className="metric-sub">{metrics.grounding.insufficient_evidence_count} flagged</p>
+                        <h3>Total Queries</h3>
+                        <p className="metric-value">{metrics.queries.total}</p>
                       </div>
                       <div className="metric-card">
-                        <h3>Avg Chunks Retrieved</h3>
-                        <p className="metric-value">{metrics.grounding.avg_retrieved_chunks}</p>
+                        <h3>Error Rate</h3>
+                        <p className="metric-value">{(metrics.errors.rate * 100).toFixed(1)}%</p>
                       </div>
                       <div className="metric-card">
-                        <h3>Avg Confidence</h3>
-                        <p className="metric-value">{(metrics.grounding.avg_confidence_score || 0).toFixed(3)}</p>
+                        <h3>Active Sessions</h3>
+                        <p className="metric-value">{metrics.sessions?.active_count ?? 0}</p>
                       </div>
-                    </>
-                  )}
+                      <div className="metric-info-full">
+                        <h4>Queries by Mode</h4>
+                        <ul>
+                          {Object.entries(metrics.queries.by_mode || {}).map(([m, count]) => (
+                            <li key={m}><strong>{m.toUpperCase()}:</strong> {count}</li>
+                          ))}
+                        </ul>
+                      </div>
+                      {metrics.grounding && (
+                        <>
+                          <div className="metric-card">
+                            <h3>Refusal Rate</h3>
+                            <p className="metric-value">{(metrics.grounding.refusal_rate * 100).toFixed(1)}%</p>
+                            <p className="metric-sub">{metrics.grounding.refusal_count} refusals</p>
+                          </div>
+                          <div className="metric-card">
+                            <h3>Low Evidence Rate</h3>
+                            <p className="metric-value">{(metrics.grounding.insufficient_evidence_rate * 100).toFixed(1)}%</p>
+                            <p className="metric-sub">{metrics.grounding.insufficient_evidence_count} flagged</p>
+                          </div>
+                          <div className="metric-card">
+                            <h3>Avg Chunks Retrieved</h3>
+                            <p className="metric-value">{metrics.grounding.avg_retrieved_chunks}</p>
+                          </div>
+                          <div className="metric-card">
+                            <h3>Avg Confidence</h3>
+                            <p className="metric-value">{(metrics.grounding.avg_confidence_score || 0).toFixed(3)}</p>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  ) : <p>Loading metrics...</p>}
                 </div>
-              ) : <p>Loading metrics...</p>}
-            </div>
-          ) : messages.length === 0 ? (
-            <div className="welcome-screen">
-              <h2>Welcome to your research workspace</h2>
-              <p>Upload scientific papers, select them as context, and ask questions with strict citation grounding.</p>
-            </div>
-          ) : (
-            messages.map((msg, i) => (
-              <div key={i} className={`message ${msg.role}`}>
-                <div className="message-content">
-                  {msg.title && <h3 className="lit-review-title">{msg.title}</h3>}
+              ) : messages.length === 0 ? (
+                <div className="welcome-screen">
+                  <h2>Welcome to your research workspace</h2>
+                  <p>Upload scientific papers, select them as context, and ask questions with strict citation grounding.</p>
+                </div>
+              ) : (
+                messages.map((msg, i) => (
+                  <div key={i} className={`message ${msg.role}`}>
+                    <div className="message-content">
+                      {msg.title && <h3 className="lit-review-title">{msg.title}</h3>}
 
-                  {msg.comparison ? (
-                    <div className="comparison-view">
-                      <h4>{msg.text}</h4>
-                      {msg.comparison.message && (
-                        <p className="muted" style={{ marginBottom: "12px" }}>
-                          {msg.comparison.message}
+                      {msg.comparison ? (
+                        <div className="comparison-view">
+                          <h4>{msg.text}</h4>
+                          {msg.comparison.message && (
+                            <p className="muted" style={{ marginBottom: "12px" }}>
+                              {msg.comparison.message}
+                            </p>
+                          )}
+                          {msg.comparison.claims?.map((c, idx) => (
+                            <div key={idx} className="claim-card">
+                              <p className="claim-text"><strong>Claim:</strong> {c.claim}</p>
+                              <div className="papers-stances">
+                                {c.papers?.map((p, pidx) => (
+                                  <div key={pidx} className={`stance-badge ${p.stance}`}>
+                                    <span>{p.paper_id.split('_').pop()}</span>: {p.stance}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="formatted-text">
+                          {msg.reviewWarning && (
+                            <div className={`review-alert ${msg.reviewStatus || "normal_review"}`}>
+                              {msg.reviewWarning}
+                            </div>
+                          )}
+                          {msg.text.split('\n').map((line, lidx) => (
+                            <p key={lidx}>{line}</p>
+                          ))}
+                        </div>
+                      )}
+
+                      {msg.discoveryMode && (
+                        <p className="message-mode-note">
+                          {msg.discoveryMode.startsWith("external_search_answer")
+                            ? `Answered from external paper discovery${msg.sourceBasis ? ` (${msg.sourceBasis.replace(/_/g, " ")})` : ""}.`
+                            : msg.discoveryMode === "external_search_unavailable"
+                              ? "External paper providers were temporarily unavailable or rate-limited."
+                              : "No local context was selected, so the assistant abstained."}
                         </p>
                       )}
-                      {msg.comparison.claims?.map((c, idx) => (
-                        <div key={idx} className="claim-card">
-                          <p className="claim-text"><strong>Claim:</strong> {c.claim}</p>
-                          <div className="papers-stances">
-                            {c.papers?.map((p, pidx) => (
-                              <div key={pidx} className={`stance-badge ${p.stance}`}>
-                                <span>{p.paper_id.split('_').pop()}</span>: {p.stance}
+
+                      {msg.suggestedSources && msg.suggestedSources.length > 0 && (
+                        <div className="suggested-sources">
+                          {msg.suggestedSources.map((paper) => (
+                            <div key={paper.id} className="suggested-paper">
+                              <div>
+                                <strong>{paper.title}</strong>
+                                <p>{(paper.authors || []).slice(0, 4).join(", ") || "Unknown authors"}</p>
                               </div>
-                            ))}
-                          </div>
+                              <div className="arxiv-actions">
+                                {paper.url && (
+                                  <a
+                                    href={paper.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="arxiv-link-btn"
+                                  >
+                                    Open
+                                  </a>
+                                )}
+                                <button
+                                  className="mini-btn"
+                                  onClick={() => importExternal(paper.id, paper.provider || "semanticscholar")}
+                                >
+                                  Import
+                                </button>
+                              </div>
+                            </div>
+                          ))}
                         </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="formatted-text">
-                      {msg.text.split('\n').map((line, lidx) => (
-                        <p key={lidx}>{line}</p>
-                      ))}
-                    </div>
-                  )}
+                      )}
 
-                  {msg.discoveryMode && (
-                    <p className="message-mode-note">
-                      {msg.discoveryMode.startsWith("external_search_answer")
-                        ? `Answered from external paper discovery${msg.sourceBasis ? ` (${msg.sourceBasis.replace(/_/g, " ")})` : ""}.`
-                        : msg.discoveryMode === "external_search_unavailable"
-                          ? "External paper providers were temporarily unavailable or rate-limited."
-                        : "No local context was selected, so the assistant abstained."}
-                    </p>
-                  )}
-
-                  {msg.suggestedSources && msg.suggestedSources.length > 0 && (
-                    <div className="suggested-sources">
-                      {msg.suggestedSources.map((paper) => (
-                        <div key={paper.id} className="suggested-paper">
-                          <div>
-                            <strong>{paper.title}</strong>
-                            <p>{(paper.authors || []).slice(0, 4).join(", ") || "Unknown authors"}</p>
-                          </div>
-                          <div className="arxiv-actions">
-                            {paper.url && (
-                              <a
-                                href={paper.url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="arxiv-link-btn"
+                      {msg.citations && msg.citations.length > 0 && (
+                        <div className="citations-grid">
+                          {msg.citations.map((c, j) => {
+                            const isSelected = selectedCitations.some((item) => citationKey(item) === citationKey(c));
+                            return (
+                              <div
+                                key={j}
+                                className={`citation-chip clickable ${j === 0 ? "top-evidence" : ""} ${isSelected ? "selected" : ""}`}
+                                onClick={() => openCitationViewer(c)}
+                                title={c.snippet || "Open citation in PDF viewer"}
                               >
-                                Open
-                              </a>
-                            )}
-                            <button
-                              className="mini-btn"
-                              onClick={() => importExternal(paper.id, paper.provider || "semanticscholar")}
-                            >
-                              Import
-                            </button>
-                          </div>
+                                <span>View {c.source} (p.{Number(c.page || 0) + 1})</span>
+                                {typeof c.score === "number" && (
+                                  <span className="citation-score">{c.score.toFixed(3)}</span>
+                                )}
+                                {j === 0 && <span className="citation-best">Best</span>}
+                                <button
+                                  className="citation-select-btn"
+                                  onClick={(e) => toggleCitationSelection(c, e)}
+                                  title={isSelected ? "Remove selection" : "Select citation for highlights"}
+                                >
+                                  {isSelected ? "Selected" : "Select"}
+                                </button>
+                              </div>
+                            );
+                          })}
                         </div>
-                      ))}
+                      )}
                     </div>
-                  )}
-
-                  {msg.citations && msg.citations.length > 0 && (
-                    <div className="citations-grid">
-                      {msg.citations.map((c, j) => (
-                        <button
-                          key={j}
-                          className={`citation-chip clickable ${j === 0 ? "top-evidence" : ""}`}
-                          onClick={() => openCitationViewer(c)}
-                          title={c.snippet || "Open citation in PDF viewer"}
-                        >
-                          View {c.source} (p.{Number(c.page || 0) + 1})
-                          {typeof c.score === "number" && (
-                            <span className="citation-score">{c.score.toFixed(3)}</span>
-                          )}
-                          {j === 0 && <span className="citation-best">Best</span>}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-            ))
-          )}
-          <div ref={chatEndRef} />
-        </div>
-
-        {pdfViewer && (
-          <div className={`pdf-drawer ${isPdfDrawerFullscreen ? "fullscreen" : ""}`}>
-            <div className="pdf-drawer-header">
-              <div>
-                <strong>{pdfViewer.filename}</strong>
-                <p>Page {pdfViewer.page}</p>
-              </div>
-              <div className="pdf-drawer-actions">
-                <button
-                  className="text-btn"
-                  onClick={() => setIsPdfDrawerFullscreen((v) => !v)}
-                >
-                  {isPdfDrawerFullscreen ? "Windowed" : "Fullscreen"}
-                </button>
-                <button
-                  className="text-btn"
-                  onClick={() => {
-                    setPdfViewer(null);
-                    setIsPdfDrawerFullscreen(false);
-                  }}
-                >
-                  Close
-                </button>
-              </div>
-            </div>
-
-            {pdfViewer.mode === "pdf" ? (
-              <iframe
-                title="PDF.js Viewer"
-                className="pdf-frame"
-                src={pdfViewer.viewerUrl}
-              />
-            ) : (
-              <div className="text-preview-panel">
-                <div className="text-preview-header">
-                  <strong>Text Preview</strong>
-                  <span className="muted">Metadata-only source</span>
-                </div>
-                <pre className="text-preview-content">
-                  {pdfViewer.textPreview || pdfViewer.snippet || "No preview text available."}
-                </pre>
-              </div>
-            )}
-
-            <div className="drawer-section">
-              <h4>Citation Snippet</h4>
-              <p className="snippet-box">{pdfViewer.snippet || "No snippet provided."}</p>
-              {pdfViewer.precisePhrase && (
-                <p className="muted" style={{ marginTop: "6px" }}>
-                  Precise page phrase: "{pdfViewer.precisePhrase}"
-                </p>
-              )}
-            </div>
-
-            <div className="drawer-section">
-              <h4>Create Highlight</h4>
-              <input
-                type="text"
-                value={highlightNote}
-                onChange={(e) => setHighlightNote(e.target.value)}
-                placeholder="Optional note..."
-              />
-              <input
-                type="text"
-                value={highlightTags}
-                onChange={(e) => setHighlightTags(e.target.value)}
-                placeholder="Tags (comma-separated)"
-              />
-              <button className="btn-primary" onClick={createHighlightFromCitation}>
-                Save Highlight
-              </button>
-            </div>
-
-            <div className="drawer-section">
-              <h4>Highlights In This Document</h4>
-              <div className="highlight-list">
-                {highlights.map((hl) => (
-                  <div key={hl.id} className="highlight-item">
-                    <div className="highlight-row">
-                      <span>p.{hl.page}</span>
-                      <button className="text-btn" onClick={() => deleteHighlight(hl.id)}>
-                        Delete
-                      </button>
-                    </div>
-                    <p>{hl.text}</p>
-                    {hl.note && <p className="muted">Note: {hl.note}</p>}
                   </div>
-                ))}
-                {highlights.length === 0 && <p className="muted">No highlights yet.</p>}
-              </div>
-            </div>
-
-            <div className="drawer-section">
-              <h4>Search In My Highlights (Session)</h4>
-              <form className="input-group" onSubmit={searchMyHighlights}>
-                <input
-                  type="text"
-                  value={highlightSearch}
-                  onChange={(e) => setHighlightSearch(e.target.value)}
-                  placeholder='e.g. supporting evidence for "claim X"'
-                />
-                <button className="btn-icon" type="submit">Go</button>
-              </form>
-              {highlightSearchLoading && <p className="muted">Searching highlights...</p>}
-              <div className="highlight-list">
-                {highlightSearchResults.map((hl) => (
-                  <button
-                    key={`${hl.id}-${hl.score}`}
-                    className="highlight-search-hit"
-                    onClick={() =>
-                      openCitationViewer({
-                        source: hl.filename,
-                        page: hl.page || 1,
-                        snippet: hl.text,
-                        pageOneIndexed: true,
-                      })
-                    }
-                  >
-                    <strong>{hl.filename}</strong> p.{hl.page} ({(hl.score || 0).toFixed(3)})
-                    <p>{hl.text}</p>
-                  </button>
-                ))}
-                {highlightSearchResults.length === 0 && <p className="muted">No search results yet.</p>}
-              </div>
+                ))
+              )}
+              <div ref={chatEndRef} />
             </div>
           </div>
-        )}
+
+          {pdfViewer && (
+            <div className={`pdf-drawer-shell ${isPdfDrawerResizing ? "resizing" : ""}`} style={{ "--pdf-drawer-width": `${pdfDrawerWidth}px` }}>
+              <button
+                type="button"
+                className="pdf-drawer-resize-handle"
+                onMouseDown={startPdfDrawerResize}
+                aria-label="Resize PDF reader panel"
+                title="Drag to resize PDF reader panel"
+              />
+              <div className="pdf-drawer">
+              <div className="pdf-drawer-header">
+                <div>
+                  <strong>{pdfViewer.filename}</strong>
+                  <p>Page {pdfViewer.page}</p>
+                </div>
+                <div className="pdf-drawer-actions">
+                  <button
+                    className="text-btn"
+                    onClick={() => {
+                      setPdfViewer(null);
+                    }}
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+              <div className="pdf-drawer-content">
+                <div className="pdf-preview-column">
+                  {pdfViewer.mode === "pdf" ? (
+                    <iframe
+                      title="PDF.js Viewer"
+                      className="pdf-frame"
+                      src={pdfViewer.viewerUrl}
+                    />
+                  ) : (
+                    <div className="text-preview-panel">
+                      <div className="text-preview-header">
+                        <strong>Text Preview</strong>
+                        <span className="muted">Metadata-only source</span>
+                      </div>
+                      <pre className="text-preview-content">
+                        {pdfViewer.textPreview || pdfViewer.snippet || "No preview text available."}
+                      </pre>
+                    </div>
+                  )}
+                </div>
+
+                <div className="pdf-notes-column">
+                  <div className="drawer-section drawer-section-first">
+                    <h4>Citation Snippet</h4>
+                    <p className="snippet-box">{pdfViewer.snippet || "No snippet provided."}</p>
+                    {pdfViewer.precisePhrase && (
+                      <p className="muted" style={{ marginTop: "6px" }}>
+                        Precise page phrase: "{pdfViewer.precisePhrase}"
+                      </p>
+                    )}
+                  </div>
+                  <div className="drawer-section">
+                    <h4>Create Highlight</h4>
+                    <input
+                      type="text"
+                      value={highlightNote}
+                      onChange={(e) => setHighlightNote(e.target.value)}
+                      placeholder="Optional note..."
+                    />
+                    <input
+                      type="text"
+                      value={highlightTags}
+                      onChange={(e) => setHighlightTags(e.target.value)}
+                      placeholder="Tags (comma-separated)"
+                    />
+                    <button className="btn-primary" onClick={createHighlightFromCitation}>
+                      Save Highlight
+                    </button>
+                  </div>
+
+                  <div className="drawer-section">
+                    <h4>Highlights In This Document</h4>
+                    <div className="highlight-list">
+                      {highlights.map((hl) => (
+                        <div key={hl.id} className="highlight-item">
+                          <div className="highlight-row">
+                            <span>p.{hl.page}</span>
+                            <button className="text-btn" onClick={() => deleteHighlight(hl.id)}>
+                              Delete
+                            </button>
+                          </div>
+                          <p>{hl.text}</p>
+                          {hl.note && <p className="muted">Note: {hl.note}</p>}
+                        </div>
+                      ))}
+                      {highlights.length === 0 && <p className="muted">No highlights yet.</p>}
+                    </div>
+                  </div>
+
+                  <div className="drawer-section">
+                    <h4>Search In My Highlights (Session)</h4>
+                    <form className="input-group" onSubmit={searchMyHighlights}>
+                      <input
+                        type="text"
+                        value={highlightSearch}
+                        onChange={(e) => setHighlightSearch(e.target.value)}
+                        placeholder='e.g. supporting evidence for "claim X"'
+                      />
+                      <button className="btn-icon" type="submit">Go</button>
+                    </form>
+                    {highlightSearchLoading && <p className="muted">Searching highlights...</p>}
+                    <div className="highlight-list">
+                      {highlightSearchResults.map((hl) => (
+                        <button
+                          key={`${hl.id}-${hl.score}`}
+                          className="highlight-search-hit"
+                          onClick={() =>
+                            openCitationViewer({
+                              source: hl.filename,
+                              page: hl.page || 1,
+                              snippet: hl.text,
+                              pageOneIndexed: true,
+                            })
+                          }
+                        >
+                          <strong>{hl.filename}</strong> p.{hl.page} ({(hl.score || 0).toFixed(3)})
+                          <p>{hl.text}</p>
+                        </button>
+                      ))}
+                      {highlightSearchResults.length === 0 && <p className="muted">No search results yet.</p>}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            </div>
+          )}
+        </div>
 
         {mode !== 'monitoring' && (
           <div className="input-area">
             {loading && <div className="thinking-banner">Model is thinking. The question bar is temporarily locked.</div>}
+            {status && <div className="status-indicator">{status}</div>}
+            {selectedCitations.length > 0 && (
+              <div className="selected-citations-bar">
+                <strong>{selectedCitations.length} citation{selectedCitations.length > 1 ? "s" : ""} selected</strong>
+                <input
+                  type="text"
+                  value={selectedCitationNote}
+                  onChange={(e) => setSelectedCitationNote(e.target.value)}
+                  placeholder="Optional note for selected citations..."
+                />
+                <input
+                  type="text"
+                  value={selectedCitationTags}
+                  onChange={(e) => setSelectedCitationTags(e.target.value)}
+                  placeholder="Tags (comma-separated)"
+                />
+                <button className="btn-primary compact" type="button" onClick={saveSelectedCitationsAsHighlights}>
+                  Save Selected Citations
+                </button>
+                <button className="text-btn" type="button" onClick={() => setSelectedCitations([])}>
+                  Clear Selection
+                </button>
+              </div>
+            )}
             <form onSubmit={askQuestion} className={`chat-input-wrapper ${loading ? "blocked" : ""}`}>
               <input
                 type="text"
@@ -1473,6 +2022,73 @@ function App() {
                 Send
               </button>
             </form>
+            <div className="prompt-toolbar">
+              <div className="mode-selector compact">
+                {['qa', 'compare', 'lit_review', 'monitoring'].map((m) => {
+                  const config = MODE_CONFIG[m];
+                  const minSourcesHint = config.minSources > 1 ? ` Requires at least ${config.minSources} sources.` : "";
+                  return (
+                    <button
+                      key={m}
+                      type="button"
+                      className={`mode-btn compact ${mode === m ? 'active' : ''}`}
+                      onClick={() => setMode(m)}
+                      title={`${config.label}: ${config.description}${minSourcesHint}`}
+                      aria-label={`${config.label}. ${config.description}${minSourcesHint}`}
+                    >
+                      {config.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="prompt-actions">
+                <button
+                  type="button"
+                  className={`text-btn inline-action ${isHighlightSearchOpen ? "active" : ""}`}
+                  onClick={() => setIsHighlightSearchOpen((open) => !open)}
+                >
+                  Highlights
+                </button>
+              </div>
+            </div>
+            {isHighlightSearchOpen && (
+              <div className="highlight-search-inline">
+                <form className="input-group compact" onSubmit={searchMyHighlights}>
+                  <input
+                    type="text"
+                    value={highlightSearch}
+                    onChange={(e) => setHighlightSearch(e.target.value)}
+                    placeholder='Search saved highlights (e.g. "supporting evidence for claim X")'
+                  />
+                  <button className="btn-icon" type="submit">Go</button>
+                </form>
+                {highlightSearchLoading && <p className="muted">Searching highlights...</p>}
+                {highlightSearchResults.length > 0 && (
+                  <div className="global-highlight-results compact">
+                    {highlightSearchResults.slice(0, 5).map((hl) => (
+                      <button
+                        key={`global-${hl.id}-${hl.score}`}
+                        className="highlight-search-hit"
+                        onClick={() =>
+                          openCitationViewer({
+                            source: hl.filename,
+                            page: hl.page || 1,
+                            snippet: hl.text,
+                            pageOneIndexed: true,
+                          })
+                        }
+                      >
+                        <strong>{hl.filename}</strong> p.{hl.page} ({(hl.score || 0).toFixed(3)})
+                        <p>{hl.text}</p>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {!highlightSearchLoading && highlightSearch.trim() && highlightSearchResults.length === 0 && (
+                  <p className="muted">No matching highlights.</p>
+                )}
+              </div>
+            )}
           </div>
         )}
       </main>
@@ -1481,4 +2097,3 @@ function App() {
 }
 
 export default App;
-

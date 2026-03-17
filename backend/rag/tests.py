@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from django.test import SimpleTestCase, TestCase
 from rest_framework.test import APIClient
@@ -6,6 +6,8 @@ from rest_framework.test import APIClient
 from rag.models import Document, IngestionJob, PaperSource, Session
 from rag.services.discovery import DiscoveryService
 from rag.services.import_utils import looks_like_pdf_url, queue_remote_import
+from rag.services.ingestion_jobs import IngestionJobRunner
+from rag.services.job_queue import enqueue_job
 from rag.services.openalex_service import OpenAlexService
 from rag.services.resilience import CircuitOpenError, TransientExternalError
 from rag.services.semanticscholar_service import SemanticScholarService
@@ -374,3 +376,78 @@ class LiteratureReviewSynthesisTests(SimpleTestCase):
         self.assertIn("b.pdf", result["content"])
         self.assertNotIn("The text provided appears", result["content"])
         self.assertNotIn("did not return a valid structured review", result["content"])
+
+    def test_generate_literature_review_marks_weakly_related_papers_as_incompatible(self):
+        docs = [
+            type(
+                "Doc",
+                (),
+                {
+                    "metadata": {"source": "vision.pdf", "page": 0},
+                    "page_content": "Image segmentation with convolutional encoders and benchmark datasets.",
+                },
+            )(),
+            type(
+                "Doc",
+                (),
+                {
+                    "metadata": {"source": "genomics.pdf", "page": 0},
+                    "page_content": "Gene expression analysis for oncology cohorts with biomarker discovery pipelines.",
+                },
+            )(),
+        ]
+
+        responses = iter([
+            "FOCUS: vision.pdf studies image segmentation benchmarks.\nMETHODS: vision.pdf uses convolutional encoders and dense prediction.\nCONTRIBUTIONS: vision.pdf improves segmentation accuracy on imaging datasets.\nLIMITATIONS: vision.pdf leaves clinical validation unexplored.",
+            "FOCUS: genomics.pdf studies cancer biomarker discovery from gene expression data.\nMETHODS: genomics.pdf uses transcriptomic analysis and cohort stratification.\nCONTRIBUTIONS: genomics.pdf identifies genomic biomarkers for oncology cohorts.\nLIMITATIONS: genomics.pdf leaves imaging-based evidence unexplored.",
+        ])
+        service = SynthesisService()
+        service.llm = type("StubLlm", (), {"invoke": lambda self, prompt: next(responses)})()
+
+        result = service.generate_literature_review(
+            "retrieval-augmented generation for clinical question answering",
+            docs,
+            ["vision.pdf", "genomics.pdf"],
+        )
+
+        self.assertEqual(result["review_status"], "incompatible_sources")
+        self.assertIn("do not support a reliable unified literature review", result["warning"])
+        self.assertIn("Why a Unified Review Is Limited", result["content"])
+        self.assertNotIn("Common Approaches Across Papers", result["content"])
+
+
+class IngestionJobRunnerTests(TestCase):
+    def test_document_ingestion_error_result_marks_job_failed(self):
+        session = Session.objects.create(name="runner-session")
+        document = Document.objects.create(
+            filename="broken.pdf",
+            session=session,
+            status="QUEUED",
+            storage_path="pdfs/broken.pdf",
+        )
+        job, _ = enqueue_job(
+            "DOCUMENT_INGEST",
+            document=document,
+            session=session,
+            payload={"document_id": document.id},
+            max_attempts=1,
+        )
+
+        runner = IngestionJobRunner()
+        runner.ingestion_service = Mock()
+        runner.ingestion_service.ingest_document.return_value = {
+            "status": "error",
+            "message": "embedding model missing",
+        }
+
+        with patch("rag.services.ingestion_jobs.default_storage.exists", return_value=True), patch(
+            "rag.services.ingestion_jobs.default_storage.path",
+            return_value="/tmp/broken.pdf",
+        ):
+            processed = runner.process_next_job()
+
+        processed.refresh_from_db()
+        document.refresh_from_db()
+        self.assertEqual(processed.status, "FAILED")
+        self.assertEqual(document.status, "FAILED")
+        self.assertIn("embedding model missing", processed.last_error)

@@ -44,6 +44,12 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name }),
     }),
+  updateSession: (name, payload) =>
+    request(`/api/session/${encodeURIComponent(name)}/`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
   deleteSession: (name) =>
     request(`/api/session/${encodeURIComponent(name)}/`, { method: "DELETE" }),
   listHistory: (session) => request(`/api/history/${toQueryString({ session })}`),

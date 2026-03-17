@@ -76,6 +76,31 @@ class ApiFlowTests(TestCase):
             self.assertEqual(list_response.data["pdfs"][0]["storage_path"], second_doc.storage_path)
             self.assertEqual(list_response.data["pdfs"][0]["file_url"], f"/media/{second_doc.storage_path}")
 
+    def test_upload_recreates_missing_named_session(self):
+        with tempfile.TemporaryDirectory() as media_root, self.settings(MEDIA_ROOT=media_root):
+            upload_response = self.client.post(
+                "/api/upload/",
+                {
+                    "file": SimpleUploadedFile("recovered.pdf", b"%PDF-1.4 fake", content_type="application/pdf"),
+                    "session": "Recovered Session",
+                },
+                format="multipart",
+            )
+
+            self.assertEqual(upload_response.status_code, 202)
+            self.assertTrue(Session.objects.filter(name="Recovered Session").exists())
+
+    def test_session_can_be_renamed_and_pinned(self):
+        response = self.client.patch(
+            f"/api/session/{self.session_name}/",
+            {"name": "renamed-session", "pinned": True},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(Session.objects.filter(name="renamed-session", pinned=True).exists())
+        self.assertFalse(Session.objects.filter(name=self.session_name).exists())
+
     @patch("rag.services.ingestion.IngestionService.ingest_document")
     def test_worker_processes_queued_upload_job(self, mock_ingest_document):
         mock_ingest_document.return_value = {"status": "success"}
@@ -300,6 +325,100 @@ class ApiFlowTests(TestCase):
         called_sources = {call.kwargs["sources"][0] for call in mock_retrieve.call_args_list}
         self.assertEqual(called_sources, {"a.pdf", "b.pdf"})
 
+    @patch("rag.views.SynthesisService.generate_literature_review")
+    @patch("rag.views.RetrievalService.retrieve")
+    def test_lit_review_exposes_warning_metadata(
+        self,
+        mock_retrieve,
+        mock_generate_review,
+    ):
+        session = Session.objects.get(name=self.session_name)
+        doc_a = Document.objects.create(filename="a.pdf", session=session, status="INDEXED")
+        doc_b = Document.objects.create(filename="b.pdf", session=session, status="INDEXED")
+
+        def _retrieve(*, query, sources, k, use_hybrid, use_multi_query, use_reranking):
+            source = sources[0]
+            return [
+                ScoredDocument(
+                    LangchainDocument(
+                        page_content=f"chunk for {source}",
+                        metadata={"source": source, "page": 0},
+                    ),
+                    score=0.82,
+                    chunk_id=f"{source}-1",
+                )
+            ]
+
+        mock_retrieve.side_effect = _retrieve
+        mock_generate_review.return_value = {
+            "title": "Literature Review: weak overlap",
+            "content": "Structured review with caveats",
+            "num_sources": 2,
+            "review_status": "warning_review",
+            "warning": "The selected papers only partially overlap with the requested topic.",
+            "review_diagnostics": {"pairwise_overlap": 0.11},
+        }
+
+        response = self.client.post(
+            "/api/ask/",
+            {
+                "question": "What are the main directions?",
+                "session": self.session_name,
+                "sources": [doc_a.filename, doc_b.filename],
+                "mode": "lit_review",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["review_status"], "warning_review")
+        self.assertIn("partially overlap", response.data["warning"])
+        self.assertEqual(response.data["review_diagnostics"]["pairwise_overlap"], 0.11)
+
+    @patch("rag.views.SynthesisService.generate_literature_review")
+    @patch("rag.views.RetrievalService.retrieve")
+    def test_lit_review_rejects_forced_review_when_evidence_is_single_source(
+        self,
+        mock_retrieve,
+        mock_generate_review,
+    ):
+        session = Session.objects.get(name=self.session_name)
+        doc_a = Document.objects.create(filename="a.pdf", session=session, status="INDEXED")
+        doc_b = Document.objects.create(filename="b.pdf", session=session, status="INDEXED")
+
+        def _retrieve(*, query, sources, k, use_hybrid, use_multi_query, use_reranking):
+            source = sources[0]
+            if source == "a.pdf":
+                return [
+                    ScoredDocument(
+                        LangchainDocument(
+                            page_content="relevant chunk for a.pdf",
+                            metadata={"source": source, "page": 0},
+                        ),
+                        score=0.9,
+                        chunk_id="a-1",
+                    )
+                ]
+            return []
+
+        mock_retrieve.side_effect = _retrieve
+
+        response = self.client.post(
+            "/api/ask/",
+            {
+                "question": "Produce a literature review",
+                "session": self.session_name,
+                "sources": [doc_a.filename, doc_b.filename],
+                "mode": "lit_review",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["review_status"], "incompatible_sources")
+        self.assertIn("at least two different selected papers", response.data["content"])
+        mock_generate_review.assert_not_called()
+
     @patch("rag.views_highlights.HighlightService.index_highlight")
     @patch("rag.views_highlights.HighlightService.search_highlights")
     def test_highlight_create_and_search_flow(
@@ -508,6 +627,42 @@ class ApiFlowTests(TestCase):
         self.assertIn("source metadata", response.data["answer"])
         self.assertFalse(response.data["is_refusal"])
 
+    def test_about_paper_question_is_explicit_when_summary_only_source_has_no_abstract(self):
+        session = Session.objects.get(name=self.session_name)
+        doc = Document.objects.create(
+            filename="europepmc_1234_abstract.txt",
+            session=session,
+            status="INDEXED",
+            title="Beyond automation: what's next for artificial intelligence in sleep?",
+            abstract="No abstract available.",
+            error_message="Note: Full PDF was unavailable. Summary-only mode.",
+        )
+        PaperSource.objects.create(
+            document=doc,
+            source_type="europepmc",
+            external_id="40657850",
+            title=doc.title,
+            authors="Abou Jaoude M.",
+            abstract="",
+            entry_url="https://europepmc.org/article/MED/40657850",
+        )
+
+        response = self.client.post(
+            "/api/ask/",
+            {
+                "question": "what's this paper about?",
+                "session": self.session_name,
+                "sources": [doc.filename],
+                "mode": "qa",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("bibliographic metadata", response.data["answer"])
+        self.assertIn("cannot reliably answer what the paper is about", response.data["answer"])
+        self.assertIn("https://europepmc.org/article/MED/40657850", response.data["answer"])
+
     @patch("rag.services.ingestion_jobs.IngestionService.ingest_metadata_only")
     @patch("rag.services.ingestion_jobs.requests.get")
     def test_remote_pdf_import_rejects_html_landing_page_and_falls_back_to_summary(
@@ -562,3 +717,5 @@ class ApiFlowTests(TestCase):
         doc.refresh_from_db()
         self.assertEqual(doc.status, "INDEXED")
         self.assertIn("Summary-only mode", doc.error_message)
+        self.assertTrue(doc.filename.endswith("_abstract.txt"))
+        self.assertIsNone(doc.storage_path)
