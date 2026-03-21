@@ -1,7 +1,9 @@
 # Scientific Research Navigator
 
 > Un espace de travail intelligent, local et souverain pour la recherche scientifique.  
-> Basé sur RAG (Retrieval-Augmented Generation), Mistral 7B et un pipeline multi-provider.
+> Basé sur RAG (Retrieval-Augmented Generation), Mistral 7B et un pipeline multi-provider. 
+
+Lien vers la publication LinkedIn : [Vidéo de démonstration](https://www.linkedin.com/feed/update/urn:li:ugcPost:7440708019870429185/)
 
 **Auteur :** Aymane KJAOUJ - Mohamed OUALGHAZI - Wiame RAKI - Yahia ZRIGA · **Date :** Mars 2026 · **Contexte :** Projet de Fin d'Études (PFE)
 
